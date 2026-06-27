@@ -1,0 +1,1 @@
+Reconstruct the true logical table of contents from noisy EPUB/PDF/OCR signals. Do not trust file boundaries by default. Return strict JSON with title, order, level, section_type, evidence, and confidence.

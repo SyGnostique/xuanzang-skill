@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xuanzang-skill"
+version = "1.0.0"
+description = "Strict book reconstruction, OCR, TOC-first segmentation, RAG cleaning, translation validation, and reinsertion workflow."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "xuanzang-skill contributors"}]
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "lxml>=4.9",
+  "PyMuPDF>=1.23",
+  "python-docx>=1.1",
+  "Pillow>=10",
+  "PyYAML>=6"
+]
+
+[project.optional-dependencies]
+ocr = ["paddleocr>=3"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+xuanzang = "xuanzang.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

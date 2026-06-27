@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+
+# macOS and editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Private books and generated translations
+*.epub
+*.pdf
+*.mobi
+*.azw3
+*.docx
+*.original_epub
+translation_packages/
+translation_runs/
+raw_responses/
+output/
+*.api
+*api*.txt
+secrets.*
+
+# Generated package outputs
+packages/
+*.log

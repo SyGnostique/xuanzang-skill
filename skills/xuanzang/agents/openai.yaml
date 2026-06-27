@@ -1,0 +1,3 @@
+display_name: 玄奘
+short_description: Strict book reconstruction, OCR, RAG, translation validation, and reinsertion.
+default_prompt: Use xuanzang to build an auditable source ledger, reconstruct the TOC, split chapters, validate source coverage, and preserve units/images through translation or RAG output.
