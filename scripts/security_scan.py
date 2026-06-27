@@ -4,7 +4,10 @@ import re
 import sys
 
 forbidden_ext = {'.epub', '.pdf', '.mobi', '.azw3', '.docx'}
-secret_patterns = [re.compile(r'sk-[A-Za-z0-9_-]{16,}'), re.compile(r'(OPENAI|DEEPSEEK)_API_KEY\s*=')]
+secret_patterns = [
+    re.compile(r'sk-[A-Za-z0-9_-]{16,}'),
+    re.compile(r'(OPENAI|DEEPSEEK|ZHIPU)_API_KEY\s*=\s*["\']?(?!your_key|YOUR_KEY|你的密钥|<)[A-Za-z0-9_-]{12,}'),
+]
 failures = []
 for p in Path('.').rglob('*'):
     if '.git' in p.parts or p.is_dir():

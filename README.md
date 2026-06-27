@@ -42,7 +42,21 @@ Scripts prove mechanical integrity. LLM or human semantic review resolves struct
 - `RAG strict`: reconstruct clean Markdown sections with PASS_STRICT / FAIL_REVIEW gates.
 - `Translation`: prepare prompt context, preserve units/images, validate model output, audit semantics, and reinsert.
 - `OCR`: create page/block ledgers with engine provenance and CJK/fallback quality gates.
+- `GLM ZCode / OpenClaw`: use `zcode/xuanzang/SKILL.md` as a compatible skill package that routes to the same local CLI.
+
+## GLM ZCode / OpenClaw
+
+The ZCode adapter is in `zcode/xuanzang`. It follows the GLM/OpenClaw skill layout with `metadata.openclaw`, fixed scripts, explicit security rules, CLI reference, response format, and error handling.
+
+```bash
+python3 zcode/xuanzang/scripts/xuanzang_zcode_cli.py check-env
+python3 zcode/xuanzang/scripts/xuanzang_zcode_cli.py --help
+```
+
+If the skill directory is copied outside this repository, either install the package with `pip install -e /path/to/xuanzang-skill` or set `XUANZANG_REPO=/path/to/xuanzang-skill`.
+
+`ZHIPU_API_KEY` is optional for local mechanical commands and should only be configured for user-approved GLM/Zhipu provider calls.
 
 ## Status
 
-v1.0 provides a tested local skeleton and strict workflow implementation with synthetic fixtures. Real-world difficult books may still require semantic review and provider-specific LLM calls.
+v1.1 provides a tested local skeleton, strict workflow implementation, and GLM ZCode/OpenClaw adapter with synthetic fixtures. Real-world difficult books may still require semantic review and provider-specific LLM calls.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xuanzang-skill"
-version = "1.0.0"
+version = "1.1.0"
 description = "Strict book reconstruction, OCR, TOC-first segmentation, RAG cleaning, translation validation, and reinsertion workflow."
 readme = "README.md"
 requires-python = ">=3.9"

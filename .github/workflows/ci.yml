@@ -12,4 +12,6 @@ jobs:
           python-version: '3.11'
       - run: pip install -e .[dev]
       - run: pytest -q
+      - run: python -m compileall -q src tests zcode scripts
+      - run: python zcode/xuanzang/scripts/xuanzang_zcode_cli.py check-env
       - run: python scripts/security_scan.py

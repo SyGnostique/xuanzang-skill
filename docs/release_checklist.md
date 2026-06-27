@@ -13,3 +13,14 @@
 - [ ] CI green
 - [ ] Security scan green
 - [ ] No private sources, generated translations, or API keys committed
+
+## v1.1 ZCode Adapter Checklist
+
+- [ ] `zcode/xuanzang/SKILL.md` has valid GLM/OpenClaw frontmatter
+- [ ] `metadata.openclaw.requires.env` and `metadata.openclaw.requires.bins` are explicit
+- [ ] ZCode wrapper can run `check-env` from a fresh checkout
+- [ ] ZCode wrapper routes to the same `xuanzang.cli` implementation
+- [ ] README documents the GLM ZCode/OpenClaw adapter
+- [ ] Security scan covers Zhipu key assignments
+- [ ] Tests cover ZCode metadata and wrapper behavior
+- [ ] CI compiles `zcode/` and runs `check-env`

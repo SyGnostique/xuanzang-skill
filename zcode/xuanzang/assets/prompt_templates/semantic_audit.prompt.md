@@ -1,0 +1,1 @@
+Compare source and translation by unit ID. Identify omissions, mistranslations, added meaning, terminology drift, ethical softening, uncertainty drift, and cross-unit boundary errors. Revise only confirmed blockers.
