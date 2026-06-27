@@ -31,3 +31,6 @@ secrets.*
 # Generated package outputs
 packages/
 *.log
+
+# Build metadata
+*.egg-info/
