@@ -41,9 +41,9 @@ def test_zcode_wrapper_check_env_and_help():
     report = json.loads(result.stdout)
     assert report['ok'] is True
     assert report['xuanzang_importable'] is True
-    assert report['xuanzang_version'] == '1.1.0'
+    assert report['xuanzang_version'] == '2.0.0'
     assert report['zhipu_api_key_present'] is False
     assert 'ZHIPU_API_KEY' in report['optional_env']
 
     help_result = subprocess.run([sys.executable, str(script), '--help'], cwd=repo, text=True, capture_output=True, check=True, env=env)
-    assert 'Strict book reconstruction' in help_result.stdout
+    assert 'Auditable document evidence restoration' in help_result.stdout

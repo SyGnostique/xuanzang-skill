@@ -24,15 +24,22 @@ def build_boundary_candidates(package: Path) -> dict[str, Any]:
             score = 0.0
             reason = ''
             if low in cues:
-                score, reason = 0.99, 'exact title match'
+                score, reason = 0.90, 'exact title match; semantic boundary review still required'
             elif any(cue and (cue in low or low in cue) for cue in cues):
-                score, reason = 0.86, 'fuzzy title match'
+                score, reason = 0.70, 'fuzzy title match; cannot auto-pass'
             if score:
+                following = blocks[idx + 1:idx + 4]
+                prose_chars = sum(len((x.get('normalized_text') or x.get('text', '')).strip()) for x in following)
+                if b.get('block_kind') == 'heading_candidate':
+                    score += 0.03
+                if prose_chars >= 120:
+                    score += 0.03
                 starts.append({'block_id': b['block_id'], 'block_index': idx, 'score': score, 'reason': reason, 'window_before': [x.get('normalized_text') for x in blocks[max(0, idx-2):idx]], 'window_after': [x.get('normalized_text') for x in blocks[idx+1:idx+3]]})
         if not starts and item.get('candidate_block_id'):
             for idx, b in enumerate(blocks):
                 if b.get('block_id') == item.get('candidate_block_id'):
-                    starts.append({'block_id': b['block_id'], 'block_index': idx, 'score': 0.92, 'reason': 'candidate block from canonical TOC', 'window_before': [], 'window_after': []})
+                    starts.append({'block_id': b['block_id'], 'block_index': idx, 'score': 0.75, 'reason': 'candidate block from canonical TOC; body boundary unresolved', 'window_before': [], 'window_after': []})
+        starts.sort(key=lambda row: (-float(row['score']), int(row['block_index'])))
         candidates.append({'toc_id': item['toc_id'], 'title': item['title'], 'candidate_start_blocks': starts[:5], 'candidate_end_blocks': []})
     result = {'chapters': candidates}
     write_json(package / 'toc' / 'boundary_candidates.json', result)
@@ -58,7 +65,7 @@ def resolve_boundaries(package: Path) -> dict[str, Any]:
             evidence = [starts[0]['reason'], starts[0]['block_id']]
         else:
             start_idx = 0 if i == 0 else chapters[-1]['end_index_exclusive']
-            confidence = 0.5
+            confidence = 0.0
             evidence = ['fallback sequential boundary']
         if i + 1 < len(toc.get('items', [])):
             next_item = toc['items'][i + 1]
@@ -81,9 +88,9 @@ def resolve_boundaries(package: Path) -> dict[str, Any]:
             'end_index_exclusive': end_idx,
             'confidence': confidence,
             'evidence': evidence,
-            'warnings': [] if confidence >= 0.85 else ['low_confidence_boundary'],
+            'warnings': [] if confidence >= 1.0 else ['low_confidence_boundary', 'semantic_boundary_review_required'],
         }
-        if confidence < 0.85:
+        if confidence < 1.0:
             low.append(ch)
         chapters.append(ch)
     result = {'chapters': chapters, 'unassigned_ranges': [], 'low_confidence_boundaries': low}
@@ -121,10 +128,12 @@ def split_chapters(package: Path) -> dict[str, Any]:
             units.append({'unit_id': unit_id, 'source_block_id': b['block_id'], 'text': text, 'block_kind': b.get('block_kind'), 'dom_path': b.get('dom_path'), 'href': b.get('href'), 'page': b.get('page')})
         # Attach images whose spine/page falls inside chapter when possible. EPUB image text order is approximated in v1 skeleton.
         ch_imgs = []
+        chapter_spines = {b.get('spine_index') for b in ch_blocks if b.get('spine_index') is not None}
+        chapter_pages = {b.get('page') for b in ch_blocks if b.get('page') is not None}
         for img in images:
-            if img.get('spine_index') is not None and ch_blocks and img.get('spine_index') == ch_blocks[0].get('spine_index'):
+            if img.get('spine_index') is not None and img.get('spine_index') in chapter_spines:
                 ch_imgs.append(img)
-            elif img.get('page') is not None and ch_blocks and img.get('page') == ch_blocks[0].get('page'):
+            elif img.get('page') is not None and img.get('page') in chapter_pages:
                 ch_imgs.append(img)
         for img in ch_imgs:
             lines.append(img['marker'])

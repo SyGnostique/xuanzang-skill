@@ -22,14 +22,14 @@ Common GLM skill patterns observed in official skills:
 
 ## Adaptation Decision
 
-`xuanzang-skill` remains a single Python implementation. The ZCode adapter is a thin skill package at `zcode/xuanzang` that calls the same `xuanzang.cli` commands as the Codex skill.
+`xuanzang-skill` remains a single Python implementation. The ZCode adapter is a thin skill package at `zcode/xuanzang` that calls the same `xuanzang.cli` commands as the Codex skill. Its v2 primary route is `restore` → `status` → `review` → `publish` → `revoke`.
 
 This avoids two dangerous failure modes:
 
 - divergent behavior between Codex and GLM/ZCode workflows;
 - unreviewed ad hoc shell instructions in the ZCode skill body.
 
-The adapter does not require `ZHIPU_API_KEY` for local ledger, split, validation, mock translation, or assembly. It treats GLM/Zhipu model calls as optional and user-approved because book text can be private or copyrighted.
+The adapter does not require `ZHIPU_API_KEY` for local restoration, status, review, publication, revocation, migration, or v1 compatibility commands. It treats GLM/Zhipu model calls as optional and user-approved because book text can be private or copyrighted. The current adapter does not implement a remote model provider or authenticated multi-tenant reviewer service.
 
 ## File Layout
 
@@ -50,10 +50,12 @@ The ZCode adapter must satisfy these checks:
 - `SKILL.md` has valid YAML frontmatter.
 - `metadata.openclaw.requires.env` and `metadata.openclaw.requires.bins` are present.
 - `homepage` and `source` point to the public repository.
-- Local commands go through `scripts/xuanzang_zcode_cli.py`.
+- Local commands go through `scripts/xuanzang_zcode_cli.py` and share the core v2 gate implementation.
 - The wrapper works from the repository without installation by discovering `src/`.
 - If copied outside the repo, users can set `XUANZANG_REPO` or install with `pip install -e`.
 - `check-env` emits JSON and never prints secret values.
+- Old translation and assembly commands remain v1 compatibility-only and do not establish v2 citation trust.
+- Workspace/tenant metadata checks do not provide authentication or authorization; public multi-tenant use remains blocked.
 
 ## Best-Practice Mapping
 
@@ -63,13 +65,13 @@ The ZCode adapter must satisfy these checks:
 | `metadata.openclaw` frontmatter | Declared in `zcode/xuanzang/SKILL.md` |
 | Fixed helper scripts | `scripts/xuanzang_zcode_cli.py` and `scripts/check_env.py` |
 | API key from env only | `ZHIPU_API_KEY` is optional and never echoed |
-| Clear mandatory restrictions | Ledger-first, TOC-first, no mock semantic PASS, no hidden exemptions |
-| Response and audit format | Durable JSON audits listed in the skill body |
+| Clear mandatory restrictions | Evidence-first, full semantic review, no mock semantic PASS, no hidden exemptions |
+| Response and audit format | Target-specific v2 gate reports, append-only decisions, revision-bound exports, and revocation tombstones |
 | Error handling | Import, unsupported format, FAIL_REVIEW, and missing-key paths documented |
 
 ## Security Policy
 
-Do not commit books, extracted text, translations, raw model responses, generated private packages, or API keys. The security scan now treats `ZHIPU_API_KEY=` assignments like other model-provider secrets.
+Do not commit books, extracted text, translations, raw model responses, generated private packages, or API keys. The security scan treats `ZHIPU_API_KEY=` assignments like other model-provider secrets. A configured key does not authorize sending source text to a provider.
 
 ## Validation
 
@@ -78,7 +80,9 @@ Run:
 ```bash
 python3 zcode/xuanzang/scripts/xuanzang_zcode_cli.py check-env
 python3 zcode/xuanzang/scripts/xuanzang_zcode_cli.py --help
-pytest -q
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 python scripts/security_scan.py
 python -m compileall -q src tests zcode
 ```
+
+For release decisions, use `docs/release_checklist.md`. The historical `audit/zcode_adapter_score.md` is a v1.1 self-assessment and has no v2 release authority.

@@ -5,12 +5,14 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
-from .utils import cjk_ratio, clean_dir, ensure_dir, sha256_file, write_json, write_jsonl
+from .utils import cjk_ratio, ensure_dir, sha256_file, write_json, write_jsonl
 
 
 def extract_pdf(source: Path, out_dir: Path, ocr: str = 'auto', lang: str | None = None, render_pages: bool = True) -> dict[str, Any]:
     source = source.resolve()
-    clean_dir(out_dir)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise FileExistsError(f'refusing to delete or overwrite existing package: {out_dir}')
+    ensure_dir(out_dir)
     ensure_dir(out_dir / 'source')
     ensure_dir(out_dir / 'ledger')
     blocks: list[dict[str, Any]] = []
@@ -63,6 +65,23 @@ def extract_pdf(source: Path, out_dir: Path, ocr: str = 'auto', lang: str | None
                 'cjk_ratio': cjk_ratio(mock_text),
             })
             ocr_pages.append(page_index)
+        elif not extracted_any and ocr in {'auto', 'paddle', 'tesseract'}:
+            from .adapters import choose_ocr_adapter
+            adapter = choose_ocr_adapter(ocr)
+            image_path = page_images_dir / f'page_{page_index:04d}.png'
+            if adapter is not None:
+                for block in adapter.recognize(image_path, lang=lang, page_id=f'page_{page_index:04d}'):
+                    block_counter += 1
+                    blocks.append({
+                        'block_id': f'p{page_index:04d}_b{block_counter:06d}',
+                        'source_type': 'pdf_ocr', 'page': page_index,
+                        'bbox': block.bbox, 'coordinate_space': 'render_pixels',
+                        'text': block.text, 'normalized_text': ' '.join(block.text.split()),
+                        'block_kind': block.block_kind, 'ocr_engine': adapter.name,
+                        'ocr_confidence': block.confidence, 'cjk_ratio': cjk_ratio(block.text),
+                    })
+                if any(b.get('page') == page_index and b.get('source_type') == 'pdf_ocr' for b in blocks):
+                    ocr_pages.append(page_index)
         for img in page.get_images(full=True):
             image_counter += 1
             images.append({
