@@ -1,5 +1,7 @@
 # xuanzang-skill v1.0 Goal Loop Score Summary
 
+> Historical archive only. Classification: `invalid_or_unverified_for_v2`. Release authority: none. The scores, test count, and `hard_blockers: 0` statement below are a 2026-06-27 v1 self-assessment; they are not current validation and cannot be inherited by a v2 package.
+
 - recorded_at: 2026-06-27T04:08:20+00:00
 - loops: 34
 - min_score: 98
@@ -43,6 +45,9 @@
 | G9.4 Release Gate Loop | 98.5 | PASS_ADVANCE |
 
 ## Validation Evidence
+
+The entries below are historical claims retained verbatim for provenance. Re-run the v2 release checklist for current evidence.
+
 - pytest -q: 5 passed
 - python scripts/security_scan.py: PASS
 - python -m compileall -q src tests: PASS
@@ -50,3 +55,7 @@
 
 ## Known Non-blocking Debt
 - Real hard-book semantic TOC and semantic translation audit require configured LLM or human review. The v1.0 skeleton enforces this boundary and does not label mock output as publication semantic PASS.
+
+## V2 status
+
+This document is excluded from all v2 trust and release decisions. See `audit/README.md`, `docs/goal_loop_scores.md`, and `docs/release_checklist.md`.

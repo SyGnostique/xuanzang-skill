@@ -75,7 +75,11 @@ def build_canonical_toc(package: Path) -> dict[str, Any]:
             continue
         used_titles.add(title.lower())
         typ = classify_section(title)
-        confidence = 0.99 if c.get('score', 0) >= 0.75 else 0.86
+        # Mechanical signals create proposals only. A high numeric heuristic must
+        # never masquerade as semantic TOC review.
+        confidence = min(float(c.get('score', 0.5)), 0.95)
+        if c.get('semantic_reviewed') is True:
+            confidence = 1.0
         items.append({
             'toc_id': f'toc_{len(items)+1:03d}',
             'order': len(items) + 1,
@@ -92,8 +96,8 @@ def build_canonical_toc(package: Path) -> dict[str, Any]:
         })
     for i, item in enumerate(items[:-1]):
         item['expected_end_before'] = items[i + 1]['title']
-    unresolved = [i for i in items if i['confidence'] < 0.85]
-    result = {'items': items, 'toc_confidence': 'high' if not unresolved else 'review', 'unresolved': unresolved}
+    unresolved = [i for i in items if i['confidence'] < 1.0]
+    result = {'items': items, 'toc_confidence': 'reviewed' if not unresolved else 'review', 'unresolved': unresolved}
     write_json(package / 'toc' / 'canonical_toc.json', result)
     blockers = ['low_confidence_toc'] if unresolved or not items else []
     audit = {'status': 'PASS' if not blockers else 'FAIL_REVIEW', 'item_count': len(items), 'hard_blockers': blockers}

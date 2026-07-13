@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .utils import ensure_dir, read_json, write_json
+from .utils import contained_path, ensure_dir, read_json, validate_opaque_id, write_json
 from .validate import validate_translation
 
 
@@ -35,7 +35,8 @@ def prep_translation(package: Path, target: str = 'zh-CN') -> dict[str, Any]:
 
 
 def run_mock_translation(package: Path, run_id: str = 'mock_v1') -> dict[str, Any]:
-    run_dir = ensure_dir(package / 'translation_runs' / run_id)
+    run_id = validate_opaque_id(run_id, label='translation run_id')
+    run_dir = ensure_dir(contained_path(package / 'translation_runs', run_id))
     ensure_dir(run_dir / 'translated_md')
     ensure_dir(run_dir / 'raw_responses')
     ensure_dir(run_dir / 'prompts')
@@ -50,20 +51,30 @@ def run_mock_translation(package: Path, run_id: str = 'mock_v1') -> dict[str, An
         idx = chapter.stem.split('_')[-1]
         (run_dir / 'translated_md' / f'chapter_{idx}.md').write_text('\n'.join(out_lines) + '\n', encoding='utf-8')
         write_json(run_dir / 'raw_responses' / f'chapter_{idx}.response.json', {'provider': 'mock', 'chapter': idx})
-    run_state = {'run_id': run_id, 'provider': 'mock', 'model': 'mock-unit-preserver', 'temperature': 0, 'status': 'TRANSLATED'}
+    run_state = {
+        'run_id': run_id, 'provider': 'mock', 'model': 'mock-unit-preserver', 'temperature': 0,
+        'status': 'COMPATIBILITY_ONLY',
+        'hard_blockers': ['mock_translation_not_semantically_validated'],
+    }
     write_json(run_dir / 'run_state.json', run_state)
     validate_translation(package, run_dir)
     return run_state
 
 
 def semantic_audit_scaffold(package: Path, run_id: str) -> dict[str, Any]:
-    run_dir = package / 'translation_runs' / run_id
+    run_id = validate_opaque_id(run_id, label='translation run_id')
+    run_dir = contained_path(package / 'translation_runs', run_id)
     lines = ['# Manual Semantic Audit', '', f'Run: `{run_id}`', '', 'Method: source-facing unit review required for real translations. Mock translations are not publication-accepted semantic output.', '']
     for unit_file in sorted((package / 'translation_units').glob('chapter_*.json')):
         data = read_json(unit_file)
-        lines += [f"## Chapter {data['chapter_index']:03d}: {data.get('title','')}", '', 'Status: `PASS_WITH_MOCK_LIMITATION`', '', 'Findings:', '- Mechanical preservation validated; semantic acceptance requires human/LLM source-facing audit for real books.', '']
+        lines += [f"## Chapter {data['chapter_index']:03d}: {data.get('title','')}", '', 'Status: `NEEDS_REVIEW`', '', 'Findings:', '- Mechanical preservation validated; semantic acceptance requires human source-facing audit for real books.', '']
     ensure_dir(run_dir / 'audit')
     (run_dir / 'audit' / 'manual_semantic_audit.md').write_text('\n'.join(lines), encoding='utf-8')
-    result = {'status': 'PASS_WITH_MOCK_LIMITATION', 'chapters': len(list((package / 'translation_units').glob('chapter_*.json'))), 'hard_blockers': []}
+    result = {
+        'status': 'NEEDS_REVIEW',
+        'chapters': len(list((package / 'translation_units').glob('chapter_*.json'))),
+        'hard_blockers': ['mock_translation_not_semantically_validated'],
+        'compatibility_only': True,
+    }
     write_json(run_dir / 'audit' / 'semantic_audit_status.json', result)
     return result

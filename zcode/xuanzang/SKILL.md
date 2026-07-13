@@ -1,8 +1,7 @@
 ---
 name: xuanzang
 description: |
-  Strict book reconstruction and translation-engineering skill for GLM ZCode/OpenClaw agents.
-  Use for EPUB, PDF, OCR-damaged, scanned, image-heavy, note-heavy, index-heavy, or structurally dirty books that need no-omission extraction, semantic TOC reconstruction, chapter splitting, image preservation, RAG PASS_STRICT audits, translation prompt preparation, semantic translation audit, or DOCX/EPUB reinsertion.
+  Compile books, papers, reports, and document bundles into versioned, auditable evidence packages for GLM ZCode/OpenClaw. Use for PDF, EPUB, DOCX, HTML/text/Markdown, image-bundle, or convertible MOBI/AZW3 restoration; native-text, scan, hybrid, OCR-damaged, multilingual, table/formula/footnote-heavy, or structurally dirty content; citation-grade knowledge-base preparation; ManualStrict paragraph coverage; compatibility-only legacy translation or EPUB/DOCX derivative assessment; corpus migration; or team review where provenance and omission gates matter.
 metadata:
   openclaw:
     requires:
@@ -14,188 +13,177 @@ metadata:
     homepage: https://github.com/SyGnostique/xuanzang-skill
 ---
 
-# 玄奘 xuanzang for GLM ZCode / OpenClaw
+# 玄奘 2.0 for GLM ZCode / OpenClaw
 
-Use this skill when source fidelity, chapter structure, OCR quality, image anchors, and translation audit matter more than speed.
+Use xuanzang as an **evidence compiler**. Restore each source into a revisioned package, preserve raw observations, apply traceable semantic decisions, and publish only the trust level proved by current gates.
 
-**Scripts are in:** `{SKILL_DIR}/scripts/`
+All commands must go through:
 
-## When to Use
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ...
+```
 
-Trigger for tasks such as:
+## Setup
 
-- Extract every chapter from a dirty EPUB/PDF without omissions.
-- Reconstruct a semantic TOC before splitting chapters.
-- Preserve images, captions, notes, indexes, and source anchors for later translation or reinsertion.
-- Clean OCR/RAG text with PASS_STRICT / FAIL_REVIEW gates.
-- Prepare translation prompts with whole-book summary, chapter briefs, terminology, style, and format policy.
-- Audit translation by source unit instead of sampling.
-- Assemble DOCX or reinsert translated text back into EPUB while preserving image positions.
-
-## Core Rule
-
-Create a source ledger before chapter splitting. Reconstruct the logical TOC before trusting EPUB spine, PDF pages, OCR lines, or filenames. Preserve unit IDs and image markers through translation. Advance only when the active loop scores at least 98 and has no hard blocker.
-
-## Dependencies
-
-Python packages are declared by the repository `pyproject.toml`.
+Install the shared implementation:
 
 ```bash
 pip install -e /path/to/xuanzang-skill
 ```
 
-If this skill directory is copied outside the repository, set:
+For a separately copied adapter, set:
 
 ```bash
 export XUANZANG_REPO=/path/to/xuanzang-skill
 ```
 
-Optional GLM/Zhipu model calls may use:
+Verify discovery without printing secrets:
 
 ```bash
-export ZHIPU_API_KEY="your_key"
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py check-env
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py --help
 ```
-
-`ZHIPU_API_KEY` is optional for local ledger, split, validation, mock translation, and reinsertion commands. Never write API keys into source files, prompts, audit logs, or committed config.
-
-## Security Notes
-
-- Do not commit copyrighted source books, extracted full text, translations, raw model responses, API keys, or generated private packages.
-- Read model keys only from environment variables or agent-managed secret config.
-- Do not silently summarize, omit, reorder, or invent text to make a book pass validation.
-- If OCR or semantic boundaries are low-confidence, return FAIL_REVIEW and preserve evidence.
-- For GLM/ZCode usage, prefer fixed scripts in `{SKILL_DIR}/scripts/` over ad hoc shell fragments.
 
 ## Mandatory Restrictions
 
-1. Use `python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ...` as the execution entrypoint.
-2. Do not bypass ledger, TOC, split, and validation stages for dirty books.
-3. Do not mark mock translation as publication-ready semantic PASS.
-4. Do not add book-specific verifier exemptions to hide OCR or structure defects.
-5. Do not send private book text to a remote model unless the user has explicitly authorized that provider call.
-
-## Setup Check
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py check-env
-```
-
-Expected output is JSON with `ok: true`, Python version, discovered repo root, xuanzang version, and whether `ZHIPU_API_KEY` is present.
-
-## Standard Workflow
-
-### 1. Inspect and Create Source Ledger
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ledger \
-  /path/to/book.epub \
-  --out /path/to/package
-```
-
-For PDF/OCR, include language when known:
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ledger \
-  /path/to/book.pdf \
-  --out /path/to/package \
-  --lang zh
-```
-
-### 2. Reconstruct TOC Semantically
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py toc /path/to/package
-```
-
-Before resolving hard books, read `references/toc-first-segmentation.md` and inspect all TOC candidates as evidence. Use GLM semantic reasoning for the canonical TOC; scripts provide evidence and deterministic storage, not the final judgment for difficult structures.
-
-### 3. Split Chapters
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py split /path/to/package
-```
-
-Inspect `toc/boundary_candidates.json` and `toc/chapter_boundary_map.json` for low-confidence boundaries.
-
-### 4. RAG Strict Cleaning
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py clean /path/to/package
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py validate /path/to/package --strict
-```
-
-PASS_STRICT requires no source coverage gap, OCR corruption, low-confidence boundary, false-pass issue, missing image, corrupted title tree, or active structure blocker.
-
-### 5. Translation Preparation
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py prep-translation /path/to/package --target zh-CN
-```
-
-Then complete the semantic artifacts in `translation_prep/`: whole-book summary, chapter briefs, style guide, terminology policy, prompt pack, and QA gates. Professional translation preparation is semantic work; do not rely on scaffolds alone.
-
-### 6. Translation Run and Audit
-
-Local smoke test:
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py translate /path/to/package --provider mock --run-id mock_v1
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py audit-translation /path/to/package --run-id mock_v1
-```
-
-For real GLM/Zhipu translation, use the prepared prompt jobs and user-approved provider settings. The output must preserve every source unit ID and every image marker exactly, then pass mechanical validation and source-facing semantic audit.
-
-### 7. Assemble Deliverables
-
-```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py assemble-docx /path/to/package --run-id mock_v1 --out /path/to/book.docx
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py reinsert-epub /path/to/package --run-id mock_v1 --out /path/to/book.epub
-```
+1. Choose `hint`, `review`, or `citation` before processing.
+2. Bind source hash, package version, policy, adapter evidence, privacy, and run ID.
+3. Keep raw evidence and manual decisions append-only.
+4. Make canonical text reversible to native/OCR blocks and geometry or DOM/XML anchors.
+5. Require ManualStrict semantic coverage for every paragraph-equivalent block before `citation_grade`.
+6. Account for every table, formula, figure, caption, note, reference, index entry, and asset occurrence in scope.
+7. Let hard blockers force `FAIL_REVIEW`; a score or mock result cannot override them.
+8. Resume by revision and preserve prior runs.
 
 ## CLI Reference
 
+### Restore, review, and publish
+
 ```bash
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py check-env
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py inspect SOURCE [--out DIR]
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ledger SOURCE --out PACKAGE [--ocr auto|mock|none] [--lang LANG]
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py restore SOURCE \
+  --out PACKAGE \
+  --target review \
+  --ocr auto \
+  --lang LANGUAGE \
+  --privacy local_only \
+  --transcription source \
+  --max-pages 10000 \
+  --max-total-pixels 10000000000 \
+  --max-source-bytes 21474836480 \
+  --resume
+```
+
+Choose `--target` from `hint`, `review`, or `citation`; choose `--ocr` from `auto`, `none`, `paddle`, `tesseract`, `mock`, `sidecar`, or `plugin:NAME`. For precomputed OCR/VLM evidence, add `--ocr sidecar --sidecar FILE`. Every usable sidecar row needs a page locator, four-number render-pixel bbox, exact page-image SHA-256, engine/version provenance, and later typed provenance review. Model names in the references describe optional integration roles; this adapter does not bundle or call them automatically.
+
+Use `--transcription source|diplomatic|normalized|both` explicitly for archives, editions, normalization, and multilingual work. `--privacy workspace` requires `--workspace-id`; `--privacy tenant` requires `--tenant-id`. Repeat `--access-tag` as needed and record rights/retention policy. Read `references/operations-and-migration.md` before changing resource ceilings, accepting source updates, enabling external bundle paths, or operating a shared service.
+
+For a large paper directory, create independent fast hint packages first:
+
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py batch PAPERS_DIR \
+  --out-root CORPUS_BUILD --target hint --ocr auto --workers 4
+```
+
+Native-text PDF pages in hint mode skip full-page rendering; OCR-required pages still render. The batch ledger records completed, failed, and fail-fast-cancelled jobs. Upgrade selected packages through a review/citation restore before ManualStrict promotion.
+
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py status PACKAGE
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py review PACKAGE \
+  --decisions DECISIONS.jsonl \
+  --expected-revision REVIEW_REVISION \
+  --expected-tenant-id TENANT \
+  --expected-workspace-id WORKSPACE
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py publish PACKAGE \
+  --target citation \
+  --out OUTPUT \
+  --expected-tenant-id TENANT \
+  --expected-workspace-id WORKSPACE
+```
+
+Status defaults to the fail-closed citation gate and reports `evaluated_target`. Add `--target hint` or `--target review` only when checking that operational tier explicitly.
+
+`status` defaults to recomputing citation eligibility; an explicit `--target hint|review|citation` changes the evaluated tier and appears in `evaluated_target`. Pass only expected scope fields present on the package. These flags compare package metadata and fail closed; they do not authenticate the reviewer. Workspace/tenant semantic review requires a trusted orchestrator-supplied verified `ReviewerContext`. Follow every executable review shape and the two-revision canonical-correction sequence in `references/evidence-package.md`.
+
+Use `--target hint` only for a disclosed discovery export. Native v2 publish emits eligible Markdown/chunks, a gate snapshot, an export manifest, and an unembedded invalidation/namespace manifest. It never raises package trust. Vector generation and ACL enforcement belong downstream. A citation export requires a recomputed strict pass.
+
+Verify that the installed runtime actually materialized required canonical corrections, structure/asset review, sidecar provenance, checkpoint recovery, and export fields. When a capability is absent or scaffold-only, retain `needs_review` and report the missing operation. Never edit a gate or derived Markdown to simulate citation readiness.
+
+## Migrate without erasing prior work
+
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py migrate-v1 OLD_PACKAGE \
+  --source ORIGINAL_SOURCE --out NEW_PACKAGE
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py migrate-book-m1 OCR_ROOT \
+  --source SOURCE_PDF \
+  --book-id BOOK_ID \
+  --out NEW_PACKAGE
+```
+
+Add `--copy-assets` to Book M1 migration only when the package must own copies. Migration retains previous OCR as evidence and starts v2 trust at `needs_review`. Historical v1 strict passes, Book M1 scores, automatic TOCs, and mechanical translation passes cannot establish v2 citation trust.
+
+## Compatibility
+
+The v1 commands remain available for existing automation:
+
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py ledger SOURCE --out PACKAGE
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py toc PACKAGE
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py split PACKAGE
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py clean PACKAGE
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py validate PACKAGE [--strict]
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py prep-translation PACKAGE [--target zh-CN]
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py translate PACKAGE [--provider mock] [--run-id RUN]
-python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py audit-translation PACKAGE [--run-id RUN]
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py validate PACKAGE --strict
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py prep-translation PACKAGE --target zh-CN
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py translate PACKAGE --provider mock --run-id RUN
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py audit-translation PACKAGE --run-id RUN
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py assemble-docx PACKAGE --run-id RUN --out DOCX
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py reinsert-epub PACKAGE --run-id RUN --out EPUB
 ```
 
-## Response Format
+Use v2 commands for new packages. Treat v1 outputs as compatibility derivatives or migration inputs.
 
-Commands print compact Python/JSON-like status to stdout and write durable audit files into the package directory:
+The translation/mock/audit and DOCX/EPUB commands above are compatibility-only. They do not create v2 translation trust, semantic publication PASS, or a v2 DOCX/EPUB export. Report those results as draft derivatives.
 
-- `audit/source_integrity.json`
-- `audit/ocr_audit.json`
-- `toc/canonical_toc.json`
-- `toc/chapter_boundary_map.json`
-- `audit/split_coverage.json`
-- `audit/pass_fail.json`
-- `translation_prep/deepseek_jobs_manifest.json`
-- `translation_runs/<run_id>/audit/final_translation_run_audit.json`
-- `translation_runs/<run_id>/audit/semantic_audit_status.json`
+Revoke package use and emit a downstream tombstone when authorized:
+
+```bash
+python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py revoke PACKAGE \
+  --reason REASON \
+  --expected-revision REVIEW_REVISION \
+  --expected-tenant-id TENANT \
+  --expected-workspace-id WORKSPACE \
+  --out /outside/package/revocation.json
+```
+
+The orchestrator must authenticate this action, purge downstream vectors/caches/exports according to policy, and collect deletion acknowledgements. `revoke` itself does not erase those systems or package run bytes.
+
+## Security Notes
+
+- Keep copyrighted/private books, extracted text, translations, page images, provider responses, and packages outside public repositories.
+- Read provider keys only from managed environment/secret storage and never echo them.
+- Require explicit user authorization before sending source content to a remote provider.
+- Prefer local fixed scripts to ad hoc processing.
+- Quarantine encrypted, DRM, malformed, unsafe, or unauthorized inputs.
+- Use public-domain or synthetic fixtures for tests.
 
 ## Error Handling
 
-- `xuanzang package is not importable`: install the repo with `pip install -e` or set `XUANZANG_REPO`.
-- `unsupported source format`: convert MOBI/AZW3 to EPUB first, then rerun ledger.
-- `FAIL_REVIEW`: inspect blocking findings and repair OCR, TOC, boundaries, images, or translation units before advancing.
-- Missing `ZHIPU_API_KEY`: only blocks user-approved GLM/Zhipu remote model calls, not local mechanical commands.
+- Preserve a failed run and return its blocker or retryable error; keep the last committed run active.
+- Treat unavailable required OCR, unsupported source features, hash/revision conflicts, schema failures, and citation gate failures as explicit stops.
+- Repair or rerun the affected configuration, then recompute status; never copy an earlier pass file forward.
+- Read `references/operations-and-migration.md` before recovery, rollback, or bulk retry.
 
-## Load References
+## When to Use References Selectively
 
-- Read `references/goal-mode.md` before staged goal loops.
-- Read `references/toc-first-segmentation.md` before splitting dirty EPUB/PDF/OCR books.
-- Read `references/pdf-ocr.md` before OCR or Chinese scanned-book work.
-- Read `references/rag-strict.md` before PASS_STRICT / FAIL_REVIEW work.
-- Read `references/translation-workflow.md` before prompt preparation or model translation.
-- Read `references/semantic-audit.md` before meaning-level review or revision.
-- Read `references/reinsertion.md` before DOCX or EPUB assembly.
+- Read `references/scenarios-and-targets.md` to choose target, source route, JSON/YAML bundle schema, deliverable, and the three-state capability matrix.
+- Read `references/evidence-package.md` for package paths, IDs, decisions, states, and invariants.
+- Read `references/pdf-ocr.md` for OCR/layout/cross-page restoration.
+- Read `references/toc-first-segmentation.md` for hierarchy, reading order, and boundaries.
+- Read `references/rag-strict.md` before retrieval, embedding, knowledge-object, or citation promotion.
+- Read `references/translation-workflow.md` before translation.
+- Read `references/semantic-audit.md` before ManualStrict or meaning-level review.
+- Read `references/reinsertion.md` before exports or publication validation.
+- Read `references/operations-and-migration.md` for batch, resume, collaboration, service, migration, or recovery.
+- Read `references/goal-mode.md` before a staged 98+ loop.
+
+## Response Format
+
+Report package path/revision, source hash, requested and achieved trust, citation decision, hard blockers, unresolved review counts, adapter evidence, lifecycle/revocation state, migration status, and export paths. Disclose `hint_only`, `needs_review`, compatibility-only output, and orchestrator-owned obligations in every downstream result.

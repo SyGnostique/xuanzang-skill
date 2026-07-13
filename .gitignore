@@ -34,3 +34,4 @@ packages/
 
 # Build metadata
 *.egg-info/
+build/

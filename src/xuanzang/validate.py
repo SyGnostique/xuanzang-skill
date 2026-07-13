@@ -11,6 +11,10 @@ IMAGE_RE = re.compile(r'^\[\[IMAGE\s+([^\]]+)\]\]')
 
 
 def validate_package(package: Path, strict: bool = False) -> dict[str, Any]:
+    manifest_path = package / 'package_manifest.json'
+    if manifest_path.exists() and read_json(manifest_path).get('package_version') == 2:
+        from .gates import evaluate_gates
+        return evaluate_gates(package, target='citation' if strict else 'hint')
     problems = []
     required = ['package_manifest.json', 'ledger/source_blocks.jsonl', 'audit/source_integrity.json']
     for rel in required:
@@ -19,10 +23,19 @@ def validate_package(package: Path, strict: bool = False) -> dict[str, Any]:
     source_blocks = read_jsonl(package / 'ledger' / 'source_blocks.jsonl')
     if not source_blocks:
         problems.append({'kind': 'source_coverage_gap', 'message': 'source block ledger is empty'})
-    pass_fail_path = package / 'audit' / 'pass_fail.json'
-    pass_fail = read_json(pass_fail_path) if pass_fail_path.exists() else None
-    if strict and (not pass_fail or pass_fail.get('status') != 'PASS_STRICT'):
-        problems.append({'kind': 'strict_status_not_pass', 'status': pass_fail.get('status') if pass_fail else None})
+    if strict:
+        required_audits = ['source_integrity.json', 'ocr_audit.json', 'toc_validation.json', 'boundary_validation.json', 'split_coverage.json', 'cleaning_audit.json']
+        for name in required_audits:
+            path = package / 'audit' / name
+            if not path.exists():
+                problems.append({'kind': 'missing_required_audit', 'path': f'audit/{name}'})
+                continue
+            upstream = read_json(path)
+            if upstream.get('status') not in {'PASS', 'PASS_STRICT'}:
+                problems.append({'kind': 'upstream_audit_not_pass', 'path': f'audit/{name}', 'status': upstream.get('status')})
+        semantic = package / 'audit' / 'manual_semantic_coverage.json'
+        if not semantic.exists() or read_json(semantic).get('status') != 'PASS':
+            problems.append({'kind': 'semantic_review_missing'})
     audit = {'status': 'PASS' if not problems else 'FAIL_REVIEW', 'problems': problems, 'source_blocks': len(source_blocks)}
     write_json(package / 'audit' / 'validation.json', audit)
     return audit

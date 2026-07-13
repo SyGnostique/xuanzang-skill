@@ -7,11 +7,22 @@ import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-from .utils import clean_dir, ensure_dir, relpath, sha256_file, sha256_text, write_json, write_jsonl
+from .utils import (
+    assert_safe_xml_bytes,
+    contained_path,
+    ensure_dir,
+    relpath,
+    sha256_file,
+    sha256_text,
+    validate_zip_archive,
+    write_json,
+    write_jsonl,
+)
 
 NS = {
     'container': 'urn:oasis:names:tc:opendocument:xmlns:container',
@@ -19,19 +30,75 @@ NS = {
 }
 
 
+def _safe_xml_root(path: Path, *, label: str) -> ET.Element:
+    data = path.read_bytes()
+    assert_safe_xml_bytes(data, label=label)
+    return ET.fromstring(data)
+
+
+def _local_reference(value: str) -> str | None:
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc:
+        return None
+    return unquote(parsed.path)
+
+
+def _safe_extract_epub(zf: zipfile.ZipFile, destination: Path) -> list[str]:
+    """Extract EPUB entries without path traversal or symlink materialization."""
+    destination = destination.resolve()
+    try:
+        validate_zip_archive(zf, label='EPUB')
+    except ValueError as exc:
+        if 'unsafe archive member path' in str(exc):
+            raise ValueError(str(exc).replace('has an unsafe archive member path', 'contains unsafe EPUB member path')) from exc
+        raise
+    names = []
+    for info in zf.infolist():
+        name = info.filename.replace('\\', '/')
+        if name.startswith('/') or any(part == '..' for part in Path(name).parts):
+            raise ValueError(f'unsafe EPUB member path: {info.filename}')
+        mode = (info.external_attr >> 16) & 0o170000
+        if mode == 0o120000:
+            raise ValueError(f'EPUB symlink members are not allowed: {info.filename}')
+        try:
+            target = contained_path(destination, name)
+        except ValueError as exc:
+            raise ValueError(f'unsafe EPUB member path: {info.filename}') from exc
+        names.append(info.filename)
+        if info.is_dir():
+            ensure_dir(target)
+            continue
+        ensure_dir(target.parent)
+        with zf.open(info) as src, target.open('wb') as dst:
+            shutil.copyfileobj(src, dst)
+    return names
+
+
 def _find_opf(epub_tree: Path) -> Path:
     container = epub_tree / 'META-INF' / 'container.xml'
     if not container.exists():
         raise ValueError('EPUB missing META-INF/container.xml')
-    root = ET.parse(container).getroot()
-    el = root.find('.//container:rootfile', NS)
-    if el is None or not el.attrib.get('full-path'):
+    root = _safe_xml_root(container, label='EPUB container')
+    rootfiles = [
+        el for el in root.findall('.//container:rootfile', NS)
+        if el.attrib.get('full-path')
+    ]
+    if not rootfiles:
         raise ValueError('EPUB container missing rootfile full-path')
-    return epub_tree / el.attrib['full-path']
+    if len(rootfiles) != 1:
+        raise ValueError('EPUB multiple renditions require explicit rootfile selection before restoration')
+    el = rootfiles[0]
+    try:
+        opf = contained_path(epub_tree, el.attrib['full-path'])
+    except ValueError as exc:
+        raise ValueError('EPUB rootfile path escapes the archive root') from exc
+    if not opf.is_file():
+        raise ValueError(f'EPUB rootfile does not exist: {el.attrib["full-path"]}')
+    return opf
 
 
-def _parse_opf(opf_path: Path) -> dict[str, Any]:
-    root = ET.parse(opf_path).getroot()
+def _parse_opf(opf_path: Path, epub_tree: Path) -> dict[str, Any]:
+    root = _safe_xml_root(opf_path, label='EPUB OPF')
     manifest = {}
     for item in root.findall('.//opf:manifest/opf:item', NS):
         item_id = item.attrib.get('id')
@@ -42,14 +109,26 @@ def _parse_opf(opf_path: Path) -> dict[str, Any]:
     for itemref in root.findall('.//opf:spine/opf:itemref', NS):
         idref = itemref.attrib.get('idref')
         if idref:
-            spine.append({'idref': idref, **manifest.get(idref, {})})
+            spine.append({
+                'idref': idref,
+                **manifest.get(idref, {}),
+                'itemref': dict(itemref.attrib),
+            })
     metadata = {}
+    metadata_properties = {}
     for child in root.findall('.//{*}metadata/*'):
         tag = child.tag.split('}', 1)[-1]
         text = (child.text or '').strip()
         if text and tag not in metadata:
             metadata[tag] = text
-    return {'manifest': manifest, 'spine': spine, 'metadata': metadata, 'opf_rel': relpath(opf_path, opf_path.parents[1])}
+        prop = child.attrib.get('property')
+        if text and prop:
+            metadata_properties[prop] = text
+    return {
+        'manifest': manifest, 'spine': spine, 'metadata': metadata,
+        'metadata_properties': metadata_properties,
+        'opf_rel': relpath(opf_path, epub_tree),
+    }
 
 
 def _node_path(node: Tag | NavigableString) -> list[int]:
@@ -102,15 +181,15 @@ def _classify_block(text: str, parent: Tag | None = None) -> str:
 
 def extract_epub(source: Path, out_dir: Path) -> dict[str, Any]:
     source = source.resolve()
-    clean_dir(out_dir)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise FileExistsError(f'refusing to delete or overwrite existing package: {out_dir}')
+    ensure_dir(out_dir)
     ensure_dir(out_dir / 'source')
-    epub_tree = out_dir / 'source' / 'epub_tree'
-    ensure_dir(epub_tree)
+    epub_tree = ensure_dir(out_dir / 'source' / 'epub_tree').resolve()
     with zipfile.ZipFile(source) as zf:
-        names = zf.namelist()
-        zf.extractall(epub_tree)
+        names = _safe_extract_epub(zf, epub_tree)
     opf_path = _find_opf(epub_tree)
-    opf = _parse_opf(opf_path)
+    opf = _parse_opf(opf_path, epub_tree)
     opf_base = opf_path.parent
 
     raw_dir = ensure_dir(out_dir / 'source' / 'raw_xhtml')
@@ -127,29 +206,44 @@ def extract_epub(source: Path, out_dir: Path) -> dict[str, Any]:
         if not href or 'html' not in media_type and not href.lower().endswith(('.xhtml', '.html', '.htm')):
             continue
         spine_count += 1
-        src_path = (opf_base / href).resolve()
+        local_href = _local_reference(href)
+        if not local_href:
+            raise ValueError(f'EPUB spine item is not a local archive member: {href}')
+        try:
+            src_path = contained_path(epub_tree, str((opf_base.relative_to(epub_tree) / local_href).as_posix()))
+        except ValueError as exc:
+            raise ValueError(f'EPUB spine path escapes the archive root: {href}') from exc
         if not src_path.exists():
             continue
         raw_name = f's{spine_index:03d}__{Path(href).name}'
         raw_path = raw_dir / raw_name
         shutil.copy2(src_path, raw_path)
-        html = src_path.read_text(encoding='utf-8', errors='replace')
-        soup = BeautifulSoup(html, 'lxml-xml')
+        html_bytes = src_path.read_bytes()
+        assert_safe_xml_bytes(html_bytes, label=f'EPUB spine XHTML {href}')
+        soup = BeautifulSoup(html_bytes, 'lxml-xml')
         for img in soup.find_all(['img', 'image']):
             ref = img.get('src') or img.get('href') or img.get('xlink:href')
             if not ref:
                 continue
             image_counter += 1
             image_id = f'img{image_counter:05d}'
-            image_path = (src_path.parent / ref).resolve()
+            local_ref = _local_reference(ref)
+            if local_ref is None:
+                image_path = None
+            else:
+                try:
+                    image_path = contained_path(epub_tree, str((src_path.parent.relative_to(epub_tree) / local_ref).as_posix()))
+                except ValueError as exc:
+                    raise ValueError(f'EPUB image path escapes the archive root: {ref}') from exc
             images.append({
                 'image_id': image_id,
                 'source_type': 'epub',
                 'spine_index': spine_index,
                 'href': href,
                 'src': ref,
-                'asset_path': relpath(image_path, epub_tree) if image_path.exists() else ref,
-                'exists': image_path.exists(),
+                'asset_path': relpath(image_path, epub_tree) if image_path is not None and image_path.exists() else ref,
+                'exists': bool(image_path is not None and image_path.exists()),
+                'external_reference': local_ref is None,
                 'dom_path': _node_path(img),
                 'marker': f'[[IMAGE {image_id} src="{ref}"]]',
             })

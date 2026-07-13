@@ -9,12 +9,17 @@ from bs4 import BeautifulSoup, NavigableString
 from docx import Document
 from docx.shared import Inches
 
-from .utils import ensure_dir, read_json, read_jsonl, write_json
+from .utils import contained_path, ensure_dir, read_json, read_jsonl, validate_opaque_id, write_json
 from .validate import parse_translated_units
 
 
 def assemble_docx(package: Path, run_id: str, out: Path) -> dict[str, Any]:
-    run_dir = package / 'translation_runs' / run_id
+    package = package.resolve()
+    out = out.resolve()
+    if out == package or package in out.parents:
+        raise ValueError('assembly output must be outside the package')
+    run_id = validate_opaque_id(run_id, label='translation run_id')
+    run_dir = contained_path(package / 'translation_runs', run_id)
     doc = Document()
     image_blocks = {img.get('marker'): img for img in read_jsonl(package / 'ledger' / 'image_blocks.jsonl')}
     image_count = 0
@@ -30,7 +35,18 @@ def assemble_docx(package: Path, run_id: str, out: Path) -> dict[str, Any]:
                 img = image_blocks.get(line.strip())
                 asset = None
                 if img and img.get('asset_path'):
-                    asset = package / 'source' / 'epub_tree' / img['asset_path']
+                    asset_locator = str(img['asset_path'])
+                    if asset_locator.startswith('runs/'):
+                        asset = contained_path(package, asset_locator)
+                    else:
+                        source_tree = (package / 'source' / 'epub_tree').resolve()
+                        asset = contained_path(source_tree, asset_locator)
+                    if asset.is_symlink():
+                        raise ValueError(f'legacy image asset cannot be a symlink: {img["asset_path"]}')
+                    if img.get('asset_sha256') and asset.is_file():
+                        from .utils import sha256_file
+                        if sha256_file(asset) != img['asset_sha256']:
+                            raise ValueError(f'legacy image asset hash mismatch: {img["asset_path"]}')
                 if asset and asset.exists():
                     try:
                         doc.add_picture(str(asset), width=Inches(4.5))
@@ -40,7 +56,12 @@ def assemble_docx(package: Path, run_id: str, out: Path) -> dict[str, Any]:
                     doc.add_paragraph(line.strip())
     ensure_dir(out.parent)
     doc.save(out)
-    audit = {'status': 'PASS' if out.exists() else 'FAIL_REVIEW', 'output': str(out), 'units': unit_count, 'images': image_count, 'hard_blockers': [] if out.exists() else ['docx_assembly_failure']}
+    audit = {
+        'status': 'COMPATIBILITY_ONLY_NEEDS_REVIEW' if out.exists() else 'FAIL_REVIEW',
+        'output': str(out), 'units': unit_count, 'images': image_count,
+        'hard_blockers': ['legacy_reinsertion_not_publication_validated'] if out.exists() else ['docx_assembly_failure'],
+        'compatibility_only': True,
+    }
     write_json(package / 'audit' / 'docx_assembly_audit.json', audit)
     return audit
 
@@ -53,13 +74,25 @@ def _visible_text_nodes(soup: BeautifulSoup):
 
 
 def reinsert_epub(package: Path, run_id: str, out: Path) -> dict[str, Any]:
+    package = package.resolve()
+    out = out.resolve()
+    if out == package or package in out.parents:
+        raise ValueError('reinsertion output must be outside the package')
+    run_id = validate_opaque_id(run_id, label='translation run_id')
     source_tree = package / 'source' / 'epub_tree'
-    build = package / 'build' / f'epub_{run_id}'
+    if not source_tree.is_dir() and (package / 'package_manifest.json').exists():
+        manifest = read_json(package / 'package_manifest.json')
+        active_run = str(manifest.get('active_run_id', ''))
+        active_run = validate_opaque_id(active_run, label='active run_id')
+        source_tree = contained_path(package, 'runs', active_run, 'assets', 'epub_tree')
+    if not source_tree.is_dir():
+        raise FileNotFoundError(f'legacy EPUB source tree not found: {source_tree}')
+    build = contained_path(package / 'build', f'epub_{run_id}')
     if build.exists():
         shutil.rmtree(build)
     shutil.copytree(source_tree, build)
     unit_files = sorted((package / 'translation_units').glob('chapter_*.json'))
-    run_dir = package / 'translation_runs' / run_id
+    run_dir = contained_path(package / 'translation_runs', run_id)
     replaced = 0
     touched = set()
     for uf in unit_files:
@@ -95,6 +128,11 @@ def reinsert_epub(package: Path, run_id: str, out: Path) -> dict[str, Any]:
         for p in sorted(build.rglob('*')):
             if p.is_file() and p != mimetype:
                 zf.write(p, str(p.relative_to(build)))
-    audit = {'status': 'PASS' if out.exists() else 'FAIL_REVIEW', 'output': str(out), 'replaced_text_nodes': replaced, 'touched_files': sorted(touched), 'hard_blockers': [] if out.exists() else ['epub_packaging_failure']}
+    audit = {
+        'status': 'COMPATIBILITY_ONLY_NEEDS_REVIEW' if out.exists() else 'FAIL_REVIEW',
+        'output': str(out), 'replaced_text_nodes': replaced, 'touched_files': sorted(touched),
+        'hard_blockers': ['legacy_reinsertion_not_publication_validated'] if out.exists() else ['epub_packaging_failure'],
+        'compatibility_only': True,
+    }
     write_json(package / 'audit' / 'epub_reinsertion_audit.json', audit)
     return audit
