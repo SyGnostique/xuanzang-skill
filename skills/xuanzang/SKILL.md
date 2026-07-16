@@ -1,9 +1,9 @@
 ---
 name: xuanzang
-description: Compile books, papers, reports, and document bundles into versioned, auditable evidence packages. Use for PDF, EPUB, DOCX, HTML/text/Markdown, raster-image or image-bundle, convertible MOBI/AZW3, or existing-OCR restoration; native-text, scanned, hybrid, OCR-damaged, multilingual, image-heavy, table/formula/footnote-heavy, or structurally dirty documents; citation-grade knowledge-base preparation; TOC and reading-order reconstruction; ManualStrict paragraph coverage; compatibility-only legacy translation or EPUB/DOCX derivative assessment; corpus migration; or team review where silent omission, unsupported repair, lost provenance, or false PASS is unacceptable.
+description: Compile books, papers, reports, and document bundles into versioned, auditable evidence packages. Use for PDF, EPUB, DOCX, HTML/text/Markdown, raster-image or image-bundle, convertible MOBI/AZW3, or existing-OCR restoration; native-text, scanned, hybrid, OCR-damaged, multilingual, image-heavy, table/formula/footnote-heavy, or structurally dirty documents; semantic and visual TOC or boundary reconstruction; citation-grade knowledge-base preparation; ManualStrict paragraph coverage; compatibility-only legacy translation or EPUB/DOCX derivative assessment; corpus migration; or team review where silent omission, unsupported repair, lost provenance, or false PASS is unacceptable.
 ---
 
-# 玄奘 2.0
+# 玄奘 2.1
 
 Treat xuanzang as an **evidence compiler**. Restore a source into a revisioned evidence package, preserve every raw observation, resolve structure and text through traceable decisions, and publish only to the trust level proved by the package.
 
@@ -17,6 +17,8 @@ Treat xuanzang as an **evidence compiler**. Restore a source into a revisioned e
 6. Treat tables, formulas, figures, captions, notes, indexes, references, and exclusions as first-class evidence.
 7. Let hard blockers override scores. Emit only `PASS_STRICT` or `FAIL_REVIEW` for citation eligibility; treat hint readiness as a separate disclosed state.
 8. Make reruns resumable and revision-aware. Source or configuration changes invalidate downstream artifacts without deleting prior revisions.
+
+For structure-heavy books, use the ordered semantic/visual prompt protocol in `assets/prompt_templates/README.md`. Prompt results are review proposals: bind accepted TOC, hierarchy, boundary, and media-affiliation decisions to the v2 evidence package through revision-aware `structure` review records. A prompt score cannot establish `citation_grade`.
 
 ## Run the v2 workflow
 
@@ -133,7 +135,9 @@ Never send private or copyrighted source text to a remote model unless the user 
 - Read [scenarios-and-targets.md](references/scenarios-and-targets.md) to select source routing, trust target, the JSON/YAML bundle schema, and the three-state runtime capability matrix.
 - Read [evidence-package.md](references/evidence-package.md) before creating, reviewing, integrating, or validating package artifacts.
 - Read [pdf-ocr.md](references/pdf-ocr.md) for native-text, scan, hybrid, layout, OCR, multilingual, or cross-page work.
+- Read [prompt-protocol.md](references/prompt-protocol.md) and [the prompt index](assets/prompt_templates/README.md) before semantic/visual TOC or boundary review.
 - Read [toc-first-segmentation.md](references/toc-first-segmentation.md) for TOC, hierarchy, reading order, chapters, sections, notes, or boundaries.
+- Read [book-type-variants.md](references/book-type-variants.md) after classifying a book's architecture.
 - Read [rag-strict.md](references/rag-strict.md) before knowledge-base, retrieval, embedding, SourcePage, card, or citation promotion.
 - Read [translation-workflow.md](references/translation-workflow.md) before translation planning or execution.
 - Read [semantic-audit.md](references/semantic-audit.md) before ManualStrict coverage, semantic review, conflict resolution, or revision.

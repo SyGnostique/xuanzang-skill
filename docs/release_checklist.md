@@ -1,6 +1,6 @@
-# Xuanzang 2.0 release checklist
+# Xuanzang 2.1 release checklist
 
-This checklist is the release authority for the 2.0 repository. Numeric goal-loop self-scores are historical records and cannot satisfy any item below.
+This checklist is the release authority for the 2.1 repository. Numeric goal-loop or prompt-protocol self-scores cannot satisfy any item below.
 
 Keep three decisions separate:
 
@@ -12,7 +12,7 @@ A green library release does not authorize a public service. A passing package g
 
 ## A. Source and release identity
 
-- [ ] `pyproject.toml` and `src/xuanzang/__init__.py` report the same `2.0.x` version.
+- [ ] `pyproject.toml` and `src/xuanzang/__init__.py` report the same `2.1.x` version.
 - [ ] The release commit is recorded and the worktree contains no unintended generated packages, sources, translations, page images, or provider responses.
 - [ ] `git diff --check` passes.
 - [ ] The source distribution and wheel build from a clean checkout.
@@ -25,7 +25,7 @@ Suggested evidence:
 git diff --check
 python -m build
 python -m venv /tmp/xuanzang-release-venv
-/tmp/xuanzang-release-venv/bin/python -m pip install dist/xuanzang_skill-2.0.*.whl
+/tmp/xuanzang-release-venv/bin/python -m pip install dist/xuanzang_skill-2.1.*.whl
 /tmp/xuanzang-release-venv/bin/xuanzang --version
 /tmp/xuanzang-release-venv/bin/xuanzang --help
 ```
@@ -215,3 +215,18 @@ The convenience files `audit/gate_report.json` and `audit/pass_fail.json` are ac
 - [ ] Require authenticated orchestrator reviewer context; package metadata or CLI expected-scope flags cannot substitute for it.
 
 The public multi-tenant section is currently a blocking checklist, not a statement of delivered capability.
+
+## K. Semantic/visual structure prompt protocol
+
+- [x] Whole-book architecture analysis does not prematurely finalize a TOC.
+- [x] Visual TOC discovery and transcription cover complete page runs, reading order, bylines, wraps, and uncertainty.
+- [x] Canonical TOC separates display title, normalized match title, type, parent, output area, and materialization.
+- [x] Boundary candidate assessment explicitly classifies running headers, TOC residue, prose mentions, captions, and OCR noise.
+- [x] Exact boundary resolution uses inclusive starts, exclusive ends, neighboring semantic context, and source evidence.
+- [x] Media affiliation protects image, caption, byline, epigraph, credit, and source-relative order.
+- [x] Post-split semantic audit reviews every section; reverse audit independently reconstructs the output TOC.
+- [x] Revision is evidence-bounded and requires dependent audit reruns.
+- [x] Prompt-stage scoring enforces 98 for implementation advancement while explicitly having no v2 package-trust authority.
+- [x] Book-type variants cover monographs, collections, lectures, interviews, catalogues, bilingual books, critical editions, reference-heavy books, Chinese scans, and dirty EPUBs.
+- [x] Codex and ZCode prompt/reference copies are byte-identical and contract-tested.
+- [ ] An authorized real-book structure review records prompt proposals as revision-bound v2 `structure` decisions and passes the current citation gate.

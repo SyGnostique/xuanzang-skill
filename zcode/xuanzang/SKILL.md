@@ -1,7 +1,7 @@
 ---
 name: xuanzang
 description: |
-  Compile books, papers, reports, and document bundles into versioned, auditable evidence packages for GLM ZCode/OpenClaw. Use for PDF, EPUB, DOCX, HTML/text/Markdown, image-bundle, or convertible MOBI/AZW3 restoration; native-text, scan, hybrid, OCR-damaged, multilingual, table/formula/footnote-heavy, or structurally dirty content; citation-grade knowledge-base preparation; ManualStrict paragraph coverage; compatibility-only legacy translation or EPUB/DOCX derivative assessment; corpus migration; or team review where provenance and omission gates matter.
+  Compile books, papers, reports, and document bundles into versioned, auditable evidence packages for GLM ZCode/OpenClaw. Use for PDF, EPUB, DOCX, HTML/text/Markdown, image-bundle, or convertible MOBI/AZW3 restoration; native-text, scan, hybrid, OCR-damaged, multilingual, table/formula/footnote-heavy, or structurally dirty content; semantic and visual TOC or boundary reconstruction; citation-grade knowledge-base preparation; ManualStrict paragraph coverage; compatibility-only legacy translation or EPUB/DOCX derivative assessment; corpus migration; or team review where provenance and omission gates matter.
 metadata:
   openclaw:
     requires:
@@ -13,7 +13,7 @@ metadata:
     homepage: https://github.com/SyGnostique/xuanzang-skill
 ---
 
-# 玄奘 2.0 for GLM ZCode / OpenClaw
+# 玄奘 2.1 for GLM ZCode / OpenClaw
 
 Use xuanzang as an **evidence compiler**. Restore each source into a revisioned package, preserve raw observations, apply traceable semantic decisions, and publish only the trust level proved by current gates.
 
@@ -43,6 +43,12 @@ Verify discovery without printing secrets:
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py check-env
 python3 {SKILL_DIR}/scripts/xuanzang_zcode_cli.py --help
 ```
+
+## Semantic and Visual Structure Protocol
+
+Before resolving a dirty book's TOC or boundaries, read `references/prompt-protocol.md`, `assets/prompt_templates/README.md`, `references/toc-first-segmentation.md`, and the applicable `references/book-type-variants.md` section. Run the prompt roles in order and use a vision-capable model whenever printed layout or page imagery affects the decision.
+
+Treat every prompt result as a review proposal. Accepted canonical TOC, hierarchy, boundary, and media-affiliation decisions must enter the v2 package through revision-bound `structure` review records and pass the current citation gate. Prompt confidence and stage scores never establish package trust.
 
 ## Mandatory Restrictions
 
@@ -176,7 +182,9 @@ The orchestrator must authenticate this action, purge downstream vectors/caches/
 - Read `references/scenarios-and-targets.md` to choose target, source route, JSON/YAML bundle schema, deliverable, and the three-state capability matrix.
 - Read `references/evidence-package.md` for package paths, IDs, decisions, states, and invariants.
 - Read `references/pdf-ocr.md` for OCR/layout/cross-page restoration.
+- Read `references/prompt-protocol.md` and `assets/prompt_templates/README.md` before semantic/visual TOC or boundary review.
 - Read `references/toc-first-segmentation.md` for hierarchy, reading order, and boundaries.
+- Read `references/book-type-variants.md` after classifying a book's architecture.
 - Read `references/rag-strict.md` before retrieval, embedding, knowledge-object, or citation promotion.
 - Read `references/translation-workflow.md` before translation.
 - Read `references/semantic-audit.md` before ManualStrict or meaning-level review.

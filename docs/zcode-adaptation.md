@@ -56,6 +56,8 @@ The ZCode adapter must satisfy these checks:
 - `check-env` emits JSON and never prints secret values.
 - Old translation and assembly commands remain v1 compatibility-only and do not establish v2 citation trust.
 - Workspace/tenant metadata checks do not provide authentication or authorization; public multi-tenant use remains blocked.
+- Prompt templates and protocol references are byte-identical to the Codex skill package.
+- Prompt protocol tests reject missing stubs, missing evidence/confidence contracts, or adapter drift.
 
 ## Best-Practice Mapping
 
@@ -68,6 +70,7 @@ The ZCode adapter must satisfy these checks:
 | Clear mandatory restrictions | Evidence-first, full semantic review, no mock semantic PASS, no hidden exemptions |
 | Response and audit format | Target-specific v2 gate reports, append-only decisions, revision-bound exports, and revocation tombstones |
 | Error handling | Import, unsupported format, FAIL_REVIEW, and missing-key paths documented |
+| Semantic/visual prompt parity | Byte-identical protocol assets enforced by `tests/test_prompt_protocol.py` |
 
 ## Security Policy
 

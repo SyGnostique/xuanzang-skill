@@ -1,8 +1,8 @@
-# 玄奘 xuanzang-skill 2.0
+# 玄奘 xuanzang-skill 2.1
 
-`xuanzang-skill` restores source documents into versioned evidence packages for review, citation-grade knowledge-base export, and downstream retrieval. Its primary contract is an auditable chain from source bytes to surfaces, evidence blocks, canonical paragraphs, semantic decisions, gates, and revision-bound exports.
+`xuanzang-skill` restores source documents into versioned evidence packages for review, citation-grade knowledge-base export, and downstream retrieval. Its primary contract is an auditable chain from source bytes to surfaces, evidence blocks, canonical paragraphs, semantic and visual structure decisions, gates, and revision-bound exports.
 
-Version 2.0 is a release candidate for trusted local restoration pilots. Code-level gates and automated canaries are implemented; the real authorized full-chain pilot, agricultural-domain review sample, release-commit CI, and maintainer signature remain acceptance work. It is not a public multi-tenant service; see [Known limitations](docs/known_limitations.md) and [2.0 release notes](docs/release_notes_2.0.md).
+Version 2.1 adds the complete multi-pass semantic/visual TOC and boundary-review protocol to the 2.0 evidence compiler. Code-level gates and automated canaries are implemented; the real authorized full-chain pilot, agricultural-domain review sample, release-commit CI, and maintainer signature remain acceptance work. It is not a public multi-tenant service; see [Known limitations](docs/known_limitations.md), [2.0 release notes](docs/release_notes_2.0.md), and [2.1 release notes](docs/release_notes_2.1.md).
 
 ## Trust model
 
@@ -49,6 +49,14 @@ xuanzang restore path/to/source.pdf \
 ```
 
 Supported inputs are PDF, EPUB, DOCX, TXT, Markdown, HTML, common raster images and image directories, MOBI/AZW3 through local conversion, and JSON/YAML source-bundle manifests. Use `--max-pages`, `--max-total-pixels`, and `--max-source-bytes` to lower resource ceilings for untrusted or unusually large inputs.
+
+### Semantic and visual structure review
+
+For dirty, scanned, multi-column, image-heavy, or structurally ambiguous books, extracted candidates are evidence inputs rather than an automatic final structure. Follow the ordered protocol in [`skills/xuanzang/assets/prompt_templates/README.md`](skills/xuanzang/assets/prompt_templates/README.md): whole-book architecture, visual TOC discovery and transcription, canonical TOC, hierarchy/materialization adjudication, candidate assessment, exact boundaries, media affiliation, exhaustive section audit, independent reverse audit, evidence-bounded revision, and the 98-point implementation gate.
+
+Use a vision-capable model when printed layout, typography, multi-column order, page imagery, or media affiliation affects the decision. Every accepted structure must still be submitted through revision-bound v2 `structure` review decisions and pass the current citation gate. Prompt output, confidence, or a 98-point score has no independent trust authority.
+
+The protocol covers monographs, edited collections, lectures, interviews, catalogues, bilingual books, critical editions, notes/index-heavy books, Chinese scans, dirty EPUBs, and sources without a reliable printed TOC.
 
 Useful restore variants:
 
@@ -234,6 +242,8 @@ If copied outside this repository, install this package or set `XUANZANG_REPO` t
 ## Validation and release posture
 
 Run the release checks in [docs/release_checklist.md](docs/release_checklist.md). The old 98-point goal-loop files under `audit/` are archived v1 self-scores and have no v2 gate authority.
+
+The v2.1 prompt-protocol score in `audit/semantic_visual_prompt_protocol_score.md` evaluates reusable prompt completeness only. It cannot promote a package, replace ManualStrict review, or satisfy the release checklist without current execution evidence.
 
 Current acceptance target:
 
