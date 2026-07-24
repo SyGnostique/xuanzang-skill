@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import posixpath
 import re
 import shutil
@@ -34,6 +35,7 @@ from .utils import (
 )
 
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp'}
+EPUB_DOM_ENGINE_VERSION = 'xuanzang-epub-dom-v2.1'
 
 
 @dataclass
@@ -203,11 +205,294 @@ def _image_blank_candidate(path: Path) -> bool:
         return False
 
 
-def _native_usable(blocks: list[dict[str, Any]]) -> bool:
+def _native_usable(blocks: list[dict[str, Any]], *, min_meaningful: int = 20) -> bool:
     text = ''.join(b['text'] for b in blocks)
     meaningful = sum(ch.isalnum() or '\u3400' <= ch <= '\u9fff' for ch in text)
     replacement = text.count('\ufffd')
-    return meaningful >= 20 and replacement / max(1, len(text)) < 0.01
+    return meaningful >= min_meaningful and replacement / max(1, len(text)) < 0.01
+
+
+def _english_plate_ocr_usable(block: dict[str, Any]) -> bool:
+    """Reject photographic texture while retaining captions and cover copy."""
+    text = ' '.join(str(block.get('text') or '').split())
+    meaningful = sum(ch.isalnum() for ch in text)
+    confidence = block.get('confidence')
+    metadata = block.get('metadata') or {}
+    supplemental_identifier = bool(
+        metadata.get('supplemental_variant')
+        and (
+            re.match(r'^[TI1]?SBN\b', text, re.I)
+            or re.search(r'(?:www\.|\.(?:edu|com|org)\b)', text, re.I)
+        )
+    )
+    return bool(
+        meaningful >= 4
+        and meaningful / max(1, len(text)) >= 0.55
+        and confidence is not None
+        and float(confidence) >= (0.20 if supplemental_identifier else 0.60)
+    )
+
+
+def _pdf_word_column_evidence(
+    page: Any, *, source_sha: str, page_id: str, engine_version: str,
+) -> list[dict[str, Any]]:
+    """Rebuild a two-column backmatter page from positioned PDF words.
+
+    Some PDFs expose both columns as one native text block and interleave them
+    line-by-line.  Word coordinates are the retained source evidence needed to
+    serialize each column completely before advancing to the next one.
+    """
+    words = list(page.get_text('words') or [])
+    if not words:
+        return []
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    grouped: dict[str, list[tuple[Any, ...]]] = {}
+    source_blocks: dict[int, list[tuple[Any, ...]]] = {}
+    for word in words:
+        if len(word) < 8 or not str(word[4]).strip():
+            continue
+        source_blocks.setdefault(int(word[5]), []).append(word)
+    for block_members in source_blocks.values():
+        min_x = min(float(word[0]) for word in block_members)
+        max_x = max(float(word[2]) for word in block_members)
+        body_region = 'left' if min_x < width * 0.48 else 'right'
+        mixed_column_block = min_x < width * 0.48 and max_x > width * 0.55
+        for word in block_members:
+            x0, y0, x1, y1 = [float(value) for value in word[:4]]
+            # Backmatter title blocks can be positioned well below the ordinary
+            # running-header band and, on right-hand pages, can sit over the right
+            # column.  Treat the explicit Index title as a page header so the
+            # canonical order is title, complete left column, complete right
+            # column, folio.
+            if y1 <= 52.0 or (str(word[4]).strip().casefold() == 'index' and y0 <= 120.0):
+                region = 'header'
+            elif y0 >= height - 52.0:
+                region = 'footer'
+            else:
+                # Assign by the typography block's left edge, not by each
+                # word's center. Long left-column lines can extend into the
+                # gutter, while italic first words on the right begin close to
+                # it. The source block origin distinguishes both cases.
+                region = (
+                    ('left' if x0 < width * 0.48 else 'right')
+                    if mixed_column_block else body_region
+                )
+            grouped.setdefault(region, []).append(word)
+    region_order = {'header': 0, 'left': 1, 'right': 2, 'footer': 3}
+    ordered_groups = sorted(
+        grouped.items(),
+        key=lambda item: (
+            region_order[item[0]],
+            min(float(word[1]) for word in item[1]),
+            min(float(word[0]) for word in item[1]),
+        ),
+    )
+    evidence = []
+    for ordinal, (region, members) in enumerate(ordered_groups, start=1):
+        # PDF block/line numbers are typography-run identifiers, not logical
+        # paragraph identities.  Italicized index titles commonly put the
+        # first word in its own block ("O" + "Brother...", "At" +
+        # "Berkeley"), and grouping by those IDs fragments real entries.
+        # Reconstruct visual lines by baseline geometry across all typography
+        # runs in the column, then serialize the complete column once.
+        clustered_lines: list[dict[str, Any]] = []
+        for word in sorted(members, key=lambda value: (float(value[1]), float(value[0]))):
+            midpoint = (float(word[1]) + float(word[3])) / 2.0
+            match = next(
+                (
+                    line for line in reversed(clustered_lines[-3:])
+                    if abs(float(line['midpoint']) - midpoint) <= 2.75
+                ),
+                None,
+            )
+            if match is None:
+                clustered_lines.append({'midpoint': midpoint, 'words': [word]})
+            else:
+                match['words'].append(word)
+                count = len(match['words'])
+                match['midpoint'] = (float(match['midpoint']) * (count - 1) + midpoint) / count
+        line_text = []
+        for line in sorted(clustered_lines, key=lambda value: float(value['midpoint'])):
+            line_words = sorted(line['words'], key=lambda word: (float(word[0]), int(word[7])))
+            line_text.append(' '.join(str(word[4]) for word in line_words))
+        text = '\n'.join(line_text).strip()
+        if not text:
+            continue
+        bbox = [
+            min(float(word[0]) for word in members),
+            min(float(word[1]) for word in members),
+            max(float(word[2]) for word in members),
+            max(float(word[3]) for word in members),
+        ]
+        evidence.append(_evidence(
+            source_sha=source_sha, page_id=page_id, ordinal=ordinal,
+            engine='pdf_native_words', engine_version=engine_version,
+            text=text, bbox=bbox, confidence=None, block_kind=_kind(text),
+            coordinate_space='pdf_points', metadata={
+                'source_block_numbers': sorted({int(word[5]) for word in members}),
+                'column_region': region,
+                'column_index': {'left': 0, 'right': 1}.get(region),
+                'reading_order_source': 'pdf_words_column_reconstruction',
+                'word_count': len(members),
+            },
+        ))
+    return evidence
+
+
+def _pdf_vector_figure_assets(
+    page: Any, *, source_sha: str, page_id: str, native: list[dict[str, Any]],
+    work: Path, render_dpi: int, page_image_sha256: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Render caption-bound PDF vector drawings as reviewable image assets.
+
+    ``page.get_images()`` sees raster XObjects only.  Born-digital plots,
+    graphical models, and diagrams are often pure drawing operators plus text
+    labels.  This function preserves a deterministic page clip while leaving
+    every original drawing and text block untouched.  Caption proximity and
+    geometric complexity nominate candidates; semantic review still decides
+    whether the occurrence and its labels are used.
+    """
+    captions = [row for row in native if row.get('block_kind') == 'caption_candidate']
+    if not captions or not hasattr(page, 'cluster_drawings'):
+        return [], []
+    try:
+        clusters = [rect for rect in page.cluster_drawings() if float(rect.width) > 0 and float(rect.height) > 0]
+        drawings = list(page.get_drawings() or [])
+    except Exception:
+        return [], []
+    if not clusters or not drawings:
+        return [], []
+
+    import fitz
+
+    def rect_of(row: dict[str, Any]) -> Any:
+        values = row.get('bbox') or []
+        return fitz.Rect(*[float(value) for value in values])
+
+    def distance(first: Any, second: Any) -> float:
+        dx = max(float(first.x0) - float(second.x1), float(second.x0) - float(first.x1), 0.0)
+        dy = max(float(first.y0) - float(second.y1), float(second.y0) - float(first.y1), 0.0)
+        return math.hypot(dx, dy)
+
+    caption_rects = [(caption, rect_of(caption)) for caption in captions]
+    assigned: dict[str, list[Any]] = {str(row['evidence_id']): [] for row in captions}
+    max_distance = max(float(page.rect.width), float(page.rect.height)) * 0.42
+    for cluster in clusters:
+        ranked = sorted(
+            ((distance(cluster, caption_rect), caption) for caption, caption_rect in caption_rects),
+            key=lambda item: item[0],
+        )
+        if ranked and ranked[0][0] <= max_distance:
+            assigned[str(ranked[0][1]['evidence_id'])].append(cluster)
+
+    assets: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
+    for caption, caption_rect in caption_rects:
+        candidate_clusters = assigned.get(str(caption['evidence_id']), [])
+        if not candidate_clusters:
+            continue
+        drawing_union = fitz.Rect(candidate_clusters[0])
+        for cluster in candidate_clusters[1:]:
+            drawing_union |= cluster
+        # ``Rect.intersects`` deliberately returns false for zero-area paths.
+        # Axis lines and graph edges commonly have a zero-width or zero-height
+        # drawing bbox, so count paths that touch the cluster as well as paths
+        # with an ordinary area intersection.
+        drawing_count = sum(
+            1 for drawing in drawings
+            if drawing.get('rect') and distance(fitz.Rect(drawing['rect']), drawing_union) <= 0.5
+        )
+        if drawing_count < 3 or float(drawing_union.width * drawing_union.height) < max(400.0, page_area * 0.001):
+            continue
+
+        expanded = fitz.Rect(
+            drawing_union.x0 - 14.0, drawing_union.y0 - 14.0,
+            drawing_union.x1 + 14.0, drawing_union.y1 + 14.0,
+        ) & page.rect
+        label_rows = []
+        for row in native:
+            if row is caption or row.get('block_kind') == 'caption_candidate':
+                continue
+            text = ' '.join(str(row.get('text') or '').split())
+            if not text or len(text) > 80 or len(text.split()) > 12:
+                continue
+            box = rect_of(row)
+            if box.intersects(expanded):
+                label_rows.append(row)
+
+        clip = fitz.Rect(drawing_union)
+        for row in label_rows:
+            clip |= rect_of(row)
+        clip = fitz.Rect(clip.x0 - 3.0, clip.y0 - 3.0, clip.x1 + 3.0, clip.y1 + 3.0) & page.rect
+
+        # Captions can sit left, right, above, or below a vector panel.  Keep
+        # the caption as canonical text and crop it out of the graphical asset.
+        if caption_rect.x1 <= drawing_union.x0 + 2.0:
+            clip.x0 = max(clip.x0, caption_rect.x1 + 1.0)
+        elif caption_rect.x0 >= drawing_union.x1 - 2.0:
+            clip.x1 = min(clip.x1, caption_rect.x0 - 1.0)
+        elif caption_rect.y0 >= drawing_union.y1 - 4.0:
+            clip.y1 = min(clip.y1, caption_rect.y0 - 1.0)
+        elif caption_rect.y1 <= drawing_union.y0 + 2.0:
+            clip.y0 = max(clip.y0, caption_rect.y1 + 1.0)
+        if clip.width <= 5.0 or clip.height <= 5.0:
+            continue
+
+        caption_block_id = _stable_id('blk', page_id, caption['evidence_id'])
+        figure_id = f"pdf_caption_{sha256_text(page_id + '|' + caption_block_id)[:16]}"
+        occurrence_id = _stable_id(
+            'occ', source_sha, page_id, 'pdf_vector_figure', caption['evidence_id'],
+            *(round(float(value), 3) for value in clip),
+        )
+        try:
+            scale = float(render_dpi) / 72.0
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+            asset_bytes = pixmap.tobytes('png')
+            asset_sha = __import__('hashlib').sha256(asset_bytes).hexdigest()
+            target = ensure_dir(work / 'assets' / 'vector_figures') / f'{asset_sha}.png'
+            if not target.exists():
+                target.write_bytes(asset_bytes)
+            asset_path = str(target.relative_to(work))
+        except Exception as exc:
+            blockers.append({
+                'kind': 'missing_image_asset', 'occurrence_id': occurrence_id,
+                'page_id': page_id, 'source_kind': 'pdf_vector_figure',
+                'caption_evidence_id': caption['evidence_id'], 'message': str(exc),
+            })
+            continue
+
+        label_blocks = [{
+            'block_id': _stable_id('blk', page_id, row['evidence_id']),
+            'evidence_id': str(row['evidence_id']),
+            'text': str(row.get('text') or ''),
+            'bbox': [float(value) for value in row.get('bbox', [])],
+        } for row in label_rows]
+        assets.append({
+            'asset_id': f'asset_{asset_sha[:16]}',
+            'occurrence_id': occurrence_id,
+            'page_id': page_id,
+            'asset_sha256': asset_sha,
+            'asset_path': asset_path,
+            'bbox': [float(clip.x0), float(clip.y0), float(clip.x1), float(clip.y1)],
+            'coordinate_space': 'pdf_points',
+            'kind': 'pdf_vector_figure_render',
+            'figure_id': figure_id,
+            'caption_evidence_id': str(caption['evidence_id']),
+            'caption_block_id': caption_block_id,
+            'vector_label_blocks': label_blocks,
+            'source_vector_bbox': [
+                float(drawing_union.x0), float(drawing_union.y0),
+                float(drawing_union.x1), float(drawing_union.y1),
+            ],
+            'source_vector_cluster_count': len(candidate_clusters),
+            'source_drawing_count': drawing_count,
+            'render_dpi': int(render_dpi),
+            'rendered_from_page_image_sha256': page_image_sha256,
+            'review_status': 'unreviewed',
+        })
+    return assets, blockers
 
 
 def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdapter | None) -> ExtractionResult:
@@ -220,11 +505,11 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
     pages_dir = ensure_dir(work / 'assets' / 'pages')
     checkpoint_dir = ensure_dir(work / 'checkpoints' / 'pages')
     doc = fitz.open(str(source))
-    if doc.page_count > policy.max_pages:
-        page_count = doc.page_count
+    page_count = doc.page_count
+    if page_count > policy.max_pages:
         doc.close()
         raise ValueError(f'PDF exceeds max_pages: {page_count} > {policy.max_pages}')
-    result.metadata.update({'pages': doc.page_count, 'metadata': dict(doc.metadata or {})})
+    result.metadata.update({'pages': page_count, 'metadata': dict(doc.metadata or {})})
     try:
         for index, item in enumerate(doc.get_toc(simple=False) or [], start=1):
             level, title, destination_page = item[:3]
@@ -238,6 +523,15 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
             })
     except Exception:
         result.metadata['pdf_outline_status'] = 'unavailable_or_malformed'
+    index_start_page = min(
+        (
+            int(row['source_page']) for row in result.toc_candidates
+            if str(row.get('text') or '').strip().casefold() == 'index' and row.get('source_page')
+        ),
+        default=None,
+    )
+    if index_start_page is not None:
+        result.metadata['index_start_page'] = index_start_page
     rendered_pixels = 0
     for page_number, page in enumerate(doc, start=1):
         page_id = f'page_{page_number:04d}'
@@ -274,6 +568,12 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
                 coordinate_space='pdf_points', metadata={'block_number': raw[5] if len(raw) > 5 else ordinal},
             )
             native.append(ev)
+        if index_start_page is not None and page_number >= index_start_page:
+            reconstructed = _pdf_word_column_evidence(
+                page, source_sha=source_sha, page_id=page_id, engine_version=fitz.VersionBind,
+            )
+            if reconstructed:
+                native = reconstructed
         result.evidence_blocks.extend(native)
         native_ok = _native_usable(native)
         page_images = []
@@ -286,6 +586,10 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
                 covered_area += max(0.0, float(rect.width) * float(rect.height))
         page_area = max(1.0, float(page.rect.width) * float(page.rect.height))
         image_coverage_ratio = min(1.0, covered_area / page_area)
+        if not native_ok and image_coverage_ratio >= 0.5:
+            # Full-page plates often contain only a short but complete native
+            # caption. OCRing the photograph is slower and can invent text.
+            native_ok = _native_usable(native, min_meaningful=8)
         mixed_visual = bool(native and image_coverage_ratio >= 0.12)
         left_column = [
             row for row in native
@@ -342,9 +646,47 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
 
         page_row['image_coverage_ratio'] = round(image_coverage_ratio, 4)
         ocr_blocks: list[dict[str, Any]] = []
-        if needs_ocr and ocr is not None and image_path is not None and pix is not None:
+        ocr_attempted_successfully = False
+        page_ocr = ocr
+        if (
+            needs_ocr
+            and ocr is not None
+            and ocr.name == 'paddle'
+            and policy.ocr == 'auto'
+            and not (policy.lang or '').startswith('zh')
+            and not _native_usable(native, min_meaningful=8)
+            and image_coverage_ratio >= 0.5
+        ):
+            from .adapters import TesseractOCRAdapter
+
+            plate_ocr = TesseractOCRAdapter()
+            if plate_ocr.available():
+                page_ocr = plate_ocr
+                page_row['ocr_route_reason'] = 'english_photo_plate_caption'
+        if needs_ocr and page_ocr is not None and image_path is not None and pix is not None:
             try:
-                raw_blocks = ocr.recognize(image_path, lang=policy.lang, page_id=page_id)
+                raw_blocks = page_ocr.recognize(image_path, lang=policy.lang, page_id=page_id)
+                if (
+                    page_ocr.name == 'tesseract'
+                    and hasattr(page_ocr, 'retry_rotated_180_if_better')
+                ):
+                    raw_blocks, orientation_corrected = page_ocr.retry_rotated_180_if_better(
+                        image_path, raw_blocks, lang=policy.lang, page_id=page_id,
+                    )
+                    if orientation_corrected:
+                        page_row['ocr_orientation_correction_degrees'] = 180
+                        page_row['ocr_source_rendition_orientation_preserved'] = True
+                if (
+                    page_ocr.name == 'tesseract' and page_number == page_count
+                    and image_coverage_ratio >= 0.8
+                    and hasattr(page_ocr, 'recognize_back_cover_regions')
+                ):
+                    supplemental = page_ocr.recognize_back_cover_regions(
+                        image_path, lang=policy.lang, page_id=page_id,
+                    )
+                    raw_blocks = page_ocr.merge_supplemental_blocks(raw_blocks, supplemental)
+                    page_row['ocr_supplemental_region_block_count'] = len(supplemental)
+                ocr_attempted_successfully = True
                 for ordinal, block in enumerate(raw_blocks, start=1):
                     bbox = block.bbox
                     bbox_valid = bool(
@@ -354,32 +696,32 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
                         and (float(bbox[2]) > float(bbox[0]) or float(bbox[3]) > float(bbox[1]))
                     )
                     if not bbox_valid:
-                        result.blockers.append({'kind': 'ocr_bbox_invalid', 'page_id': page_id, 'ordinal': ordinal, 'engine': ocr.name})
-                    if getattr(ocr, 'requires_anchor_attestation', False):
+                        result.blockers.append({'kind': 'ocr_bbox_invalid', 'page_id': page_id, 'ordinal': ordinal, 'engine': page_ocr.name})
+                    if getattr(page_ocr, 'requires_anchor_attestation', False):
                         supplied = (block.metadata or {}).get('source_image_sha256') or (block.metadata or {}).get('page_image_sha256')
                         actual = sha256_file(image_path)
                         if supplied != actual:
                             result.blockers.append({
                                 'kind': (
-                                    'sidecar_source_image_unverified' if ocr.name == 'sidecar'
+                                    'sidecar_source_image_unverified' if page_ocr.name == 'sidecar'
                                     else 'external_ocr_source_image_unverified'
                                 ), 'page_id': page_id,
-                                'ordinal': ordinal, 'engine': ocr.name,
+                                'ordinal': ordinal, 'engine': page_ocr.name,
                             })
                     ocr_blocks.append(_evidence(
-                        source_sha=source_sha, page_id=page_id, ordinal=ordinal, engine=ocr.name,
-                        engine_version=ocr.version(), text=block.text, bbox=block.bbox,
+                        source_sha=source_sha, page_id=page_id, ordinal=ordinal, engine=page_ocr.name,
+                        engine_version=page_ocr.version(), text=block.text, bbox=block.bbox,
                         confidence=block.confidence, block_kind=block.block_kind or _kind(block.text),
                         coordinate_space='render_pixels', metadata=block.metadata,
                     ))
                 result.evidence_blocks.extend(ocr_blocks)
-                if ocr_blocks and (ocr.name == 'sidecar' or getattr(ocr, 'requires_provenance_review', False)):
+                if ocr_blocks and (page_ocr.name == 'sidecar' or getattr(page_ocr, 'requires_provenance_review', False)):
                     result.blockers.append({
                         'kind': (
-                            'sidecar_provenance_requires_review' if ocr.name == 'sidecar'
+                            'sidecar_provenance_requires_review' if page_ocr.name == 'sidecar'
                             else 'external_ocr_provenance_requires_review'
                         ), 'page_id': page_id,
-                        'adapter_name': ocr.name, 'adapter_version': ocr.version(),
+                        'adapter_name': page_ocr.name, 'adapter_version': page_ocr.version(),
                         'producer_engine_claims': sorted({
                             str((block.get('metadata') or {}).get('sidecar_producer', {}).get('claimed_engine'))
                             for block in ocr_blocks
@@ -389,9 +731,14 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
                 page_row['quality_flags'].append('ocr_failure')
                 result.blockers.append({'kind': 'ocr_failure', 'page_id': page_id, 'message': str(exc), 'retryable': True})
 
-        selected = native if native_ok else (ocr_blocks or native)
+        canonical_ocr_blocks = ocr_blocks
+        if page_row.get('ocr_route_reason') == 'english_photo_plate_caption':
+            canonical_ocr_blocks = [block for block in ocr_blocks if _english_plate_ocr_usable(block)]
+            page_row['ocr_raw_block_count'] = len(ocr_blocks)
+            page_row['ocr_selected_block_count'] = len(canonical_ocr_blocks)
+        selected = native if native_ok else (canonical_ocr_blocks or native)
         reason = 'usable_native_text' if native_ok else (
-            'ocr_required_for_weak_or_missing_text_layer' if ocr_blocks else ('weak_native_preserved_for_review' if native else 'none')
+            'ocr_required_for_weak_or_missing_text_layer' if canonical_ocr_blocks else ('weak_native_preserved_for_review' if native else 'none')
         )
         result.canonical_blocks.extend(_canonical(ev, reason) for ev in selected)
         if mixed_visual:
@@ -438,13 +785,23 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
                         'page_id': page_id, 'xref': xref,
                     })
 
+        vector_assets, vector_blockers = _pdf_vector_figure_assets(
+            page, source_sha=source_sha, page_id=page_id, native=native,
+            work=work, render_dpi=policy.render_dpi,
+            page_image_sha256=page_row.get('page_image_sha256'),
+        )
+        result.assets.extend(vector_assets)
+        result.blockers.extend(vector_blockers)
+        if vector_assets:
+            page_row['vector_figure_candidate_count'] = len(vector_assets)
+
         if selected:
-            page_row['status'] = 'extracted' if native_ok or ocr_blocks else 'needs_review'
-            page_row['route'] = 'native_text' if native_ok and not ocr_blocks else ('hybrid' if native and ocr_blocks else ('ocr' if ocr_blocks else 'weak_native'))
-            if native and not native_ok and not ocr_blocks:
+            page_row['status'] = 'extracted' if native_ok or canonical_ocr_blocks else 'needs_review'
+            page_row['route'] = 'native_text' if native_ok and not canonical_ocr_blocks else ('hybrid' if native and canonical_ocr_blocks else ('ocr' if canonical_ocr_blocks else 'weak_native'))
+            if native and not native_ok and not canonical_ocr_blocks:
                 page_row['quality_flags'].append('weak_native_text_layer_unresolved')
                 result.blockers.append({'kind': 'weak_native_text_layer_unresolved', 'page_id': page_id})
-            confidences = [b['confidence'] for b in ocr_blocks if b['confidence'] is not None]
+            confidences = [b['confidence'] for b in canonical_ocr_blocks if b['confidence'] is not None]
             if confidences and sum(confidences) / len(confidences) < 0.90:
                 page_row['quality_flags'].append('low_ocr_confidence_unresolved')
                 result.blockers.append({'kind': 'low_ocr_confidence_unresolved', 'page_id': page_id})
@@ -452,6 +809,11 @@ def extract_pdf_v2(source: Path, work: Path, policy: RestorePolicy, ocr: OCRAdap
             page_row['status'] = 'blank_candidate'
             page_row['route'] = 'blank_review'
             page_row['quality_flags'].append('blank_requires_confirmation')
+        elif ocr_attempted_successfully and page_images and image_coverage_ratio >= 0.8:
+            page_row['status'] = 'visual_only'
+            page_row['route'] = 'visual_review'
+            page_row['quality_flags'].append('visual_only_page_requires_rendered_evidence')
+            result.blockers.append({'kind': 'visual_only_page_requires_rendered_evidence', 'page_id': page_id})
         else:
             page_row['status'] = 'unresolved'
             page_row['route'] = 'ocr_required'
@@ -524,6 +886,61 @@ def _epub_nav_type(nav: Any) -> str:
     return 'other'
 
 
+def _safe_ncx_payload(data: bytes, *, label: str) -> tuple[bytes, bool]:
+    """Remove a simple external NCX DOCTYPE without resolving the DTD.
+
+    EPUB 2 files commonly carry the standard NISO public declaration.  We can
+    parse those safely after deleting that declaration, but internal subsets,
+    entity declarations, and non-ASCII-compatible encodings remain blocked.
+    """
+    if b'\x00' in data:
+        assert_safe_xml_bytes(data, label=label)
+        return data, False
+    declaration_view = data.upper()
+    if b'<!ENTITY' in declaration_view:
+        assert_safe_xml_bytes(data, label=label)
+    if b'<!DOCTYPE' not in declaration_view:
+        assert_safe_xml_bytes(data, label=label)
+        return data, False
+    pattern = re.compile(
+        rb'<!DOCTYPE\s+ncx\s+(?:PUBLIC\s+"[^"<>]*"\s+"[^"<>]*"|SYSTEM\s+"[^"<>]*")\s*>',
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(data))
+    if len(matches) != 1:
+        assert_safe_xml_bytes(data, label=label)
+    match = matches[0]
+    sanitized = data[:match.start()] + data[match.end():]
+    assert_safe_xml_bytes(sanitized, label=label)
+    return sanitized, True
+
+
+def _safe_epub3_nav_payload(data: bytes, *, label: str) -> tuple[bytes, bool]:
+    """Remove only the inert HTML5 ``<!DOCTYPE html>`` declaration.
+
+    Internal subsets, ENTITY declarations, PUBLIC/SYSTEM identifiers, unusual
+    root names, and NUL-padded encodings continue through the fail-closed XML
+    guard and are never exposed to the parser.
+    """
+    if b'\x00' in data:
+        assert_safe_xml_bytes(data, label=label)
+        return data, False
+    declaration_view = data.upper()
+    if b'<!ENTITY' in declaration_view:
+        assert_safe_xml_bytes(data, label=label)
+    if b'<!DOCTYPE' not in declaration_view:
+        assert_safe_xml_bytes(data, label=label)
+        return data, False
+    pattern = re.compile(rb'<!DOCTYPE\s+html\s*>', re.IGNORECASE)
+    matches = list(pattern.finditer(data))
+    if len(matches) != 1:
+        assert_safe_xml_bytes(data, label=label)
+    match = matches[0]
+    sanitized = data[:match.start()] + data[match.end():]
+    assert_safe_xml_bytes(sanitized, label=label)
+    return sanitized, True
+
+
 def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> ExtractionResult:
     source_sha = sha256_file(source)
     result = ExtractionResult('epub', {'source_sha256': source_sha})
@@ -573,6 +990,15 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
             is_visual_resource = media_type.startswith('image/') or href.lower().endswith(tuple(IMAGE_SUFFIXES) + ('.svg',))
             has_text = bool(blocks_by_spine.get(spine_index))
             has_images = bool(images_by_spine.get(spine_index)) or is_visual_resource
+            rendition_path: Path | None = resource if is_visual_resource and resource_exists else None
+            if is_markup and not has_text and len(images_by_spine.get(spine_index, [])) == 1:
+                image_rel = images_by_spine[spine_index][0].get('asset_path')
+                try:
+                    image_file = contained_path(tree_target, str(image_rel)) if image_rel else None
+                except ValueError:
+                    image_file = None
+                if image_file and image_file.is_file():
+                    rendition_path = image_file
             quality_flags: list[str] = []
             if resolved.get('status') != 'local' or not resource_exists:
                 status = 'unresolved'
@@ -612,7 +1038,9 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                 'href': archive_href, 'original_href': href, 'media_type': media_type,
                 'linear': itemref.get('linear', 'yes'), 'itemref_properties': itemref_properties,
                 'manifest_properties': manifest_properties, 'fallback': item.get('fallback'),
-                'page_image_path': None, 'status': status, 'route': route,
+                'page_image_path': str(rendition_path.relative_to(work)) if rendition_path else None,
+                'page_image_sha256': sha256_file(rendition_path) if rendition_path else None,
+                'status': status, 'route': route,
                 'quality_flags': quality_flags, 'effective_fixed_layout': effective_fixed_layout,
             })
             if archive_href:
@@ -638,13 +1066,37 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
             if page_id is None:
                 result.blockers.append({'kind': 'epub_block_surface_fk_invalid', 'spine_index': spine_index})
                 continue
+            block_metadata = {
+                key: block.get(key) for key in (
+                    'href', 'dom_path', 'tag', 'class', 'ancestor_ids', 'ancestor_tags',
+                    'epub_types', 'data_types', 'source_role', 'dom_container_text',
+                    'figure_id', 'figure_dom_path',
+                    'figcaption_id', 'figcaption_dom_path', 'table_id', 'table_dom_path',
+                    'table_caption', 'table_row_index', 'table_cell_index',
+                    'table_cell_tag', 'rowspan', 'colspan',
+                    'link_href', 'link_text', 'link_rel',
+                    'mathml_dom_path', 'mathml_xml', 'mathml_sha256',
+                    'mathml_alttext', 'mathml_display',
+                    'callout_dom_path', 'callout_src', 'callout_label',
+                    'callout_target', 'callout_anchor_id', 'callout_anchor_dom_path',
+                    'pre_dom_path', 'pre_xml', 'pre_xml_sha256',
+                    'pre_text', 'pre_text_sha256', 'code_language',
+                )
+                if block.get(key) is not None
+            }
+            block_href = str(block.get('href') or '')
+            block_ref = _epub_resolve_href(tree_target, opf_rel, block_href) if block_href else {}
+            if block_ref.get('archive_path'):
+                block_metadata['raw_xhtml'] = f"assets/epub_tree/{block_ref['archive_path']}"
             ev = _evidence(
-                source_sha=source_sha, page_id=page_id, ordinal=ordinal, engine='epub_dom', engine_version=None,
+                source_sha=source_sha, page_id=page_id, ordinal=ordinal, engine='epub_dom',
+                engine_version=EPUB_DOM_ENGINE_VERSION,
                 text=block['text'], bbox=[], confidence=None, block_kind=block.get('block_kind', _kind(block['text'], block.get('tag'))),
-                coordinate_space='dom_path', metadata={k: block.get(k) for k in ('href', 'dom_path', 'tag', 'class', 'raw_xhtml')},
+                coordinate_space='dom_path', metadata=block_metadata,
             )
             result.evidence_blocks.append(ev)
-            result.canonical_blocks.append(_canonical(ev, 'authoritative_epub_dom_text'))
+            if block_metadata.get('source_role') != 'recurring_footer':
+                result.canonical_blocks.append(_canonical(ev, 'authoritative_epub_dom_text'))
         for image in image_rows:
             asset_rel = image.get('asset_path')
             try:
@@ -660,6 +1112,14 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                 'asset_path': f"assets/epub_tree/{asset_rel}" if image.get('exists') and asset_exists else None,
                 'asset_sha256': sha256_file(asset_file) if asset_exists else None,
                 'dom_path': image.get('dom_path'),
+                'alt_text': image.get('alt_text'),
+                'figure_id': image.get('figure_id'),
+                'figure_dom_path': image.get('figure_dom_path'),
+                'caption_text': image.get('caption_text'),
+                'caption_dom_path': image.get('caption_dom_path'),
+                'callout_role': image.get('callout_role'),
+                'callout_target': image.get('callout_target'),
+                'callout_anchor_id': image.get('callout_anchor_id'),
                 'href': image.get('href'),
                 'kind': 'epub_image',
                 'review_status': 'unreviewed',
@@ -704,8 +1164,17 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                 result.blockers.append({'kind': 'epub_navigation_missing', 'manifest_id': item_id})
                 continue
             data = navigation_path.read_bytes()
+            navigation_data = data
+            doctype_removed = False
             try:
-                assert_safe_xml_bytes(data, label=f'EPUB navigation {navigation_rel}')
+                if is_ncx:
+                    navigation_data, doctype_removed = _safe_ncx_payload(
+                        data, label=f'EPUB navigation {navigation_rel}',
+                    )
+                else:
+                    navigation_data, doctype_removed = _safe_epub3_nav_payload(
+                        data, label=f'EPUB navigation {navigation_rel}',
+                    )
             except ValueError as exc:
                 result.blockers.append({
                     'kind': 'epub_navigation_unsafe_xml', 'manifest_id': item_id,
@@ -716,7 +1185,33 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                 'manifest_id': item_id, 'archive_path': navigation_rel,
                 'navigation_kind': 'epub3_nav' if is_nav else 'epub2_ncx',
                 'sha256': sha256_file(navigation_path),
+                'external_doctype_removed_before_parse': doctype_removed,
             })
+
+            def record_navigation_surface(*, semantic_status: str, fallback: str | None) -> None:
+                result.pages.append({
+                    'page_id': f'navres_{_stable_id("surface", source_sha, navigation_rel)[-12:]}',
+                    'ordinal': len(result.pages) + 1,
+                    'source_page': None,
+                    'href': navigation_rel,
+                    'original_href': href,
+                    'media_type': media_type,
+                    'page_image_path': None,
+                    'page_image_sha256': None,
+                    'status': 'extracted',
+                    'route': 'epub_navigation_metadata',
+                    'surface_kind': 'epub_navigation_resource',
+                    'quality_flags': [],
+                    'surface_role': 'auxiliary_navigation',
+                    'canonical_inclusion': 'excluded',
+                    'exclusion_reason': (
+                        'Navigation metadata is retained and audited separately from OPF spine reading order.'
+                    ),
+                    'navigation_kind': 'epub3_nav' if is_nav else 'epub2_ncx',
+                    'navigation_semantic_status': semantic_status,
+                    'navigation_sha256': sha256_file(navigation_path),
+                    'fallback_navigation': fallback,
+                })
 
             def add_navigation_candidate(
                 *, candidate_id: str, text: str, original_href: str,
@@ -759,7 +1254,7 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
 
             if is_nav:
                 try:
-                    soup = BeautifulSoup(data, 'lxml-xml')
+                    soup = BeautifulSoup(navigation_data, 'lxml-xml')
                 except Exception as exc:
                     result.blockers.append({'kind': 'epub_navigation_malformed', 'manifest_id': item_id, 'message': str(exc)})
                     continue
@@ -770,7 +1265,15 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                     if base_resolution.get('status') != 'local':
                         result.blockers.append({'kind': 'epub_navigation_base_invalid', 'manifest_id': item_id, 'href': base_href})
                 nav_index = 0
-                for nav in soup.find_all('nav'):
+                nav_elements = soup.find_all('nav')
+                record_navigation_surface(
+                    semantic_status=(
+                        'parsed_semantic_navigation' if nav_elements
+                        else 'nonsemantic_navigation_document_fallback_required'
+                    ),
+                    fallback=('epub2_ncx' if not nav_elements else None),
+                )
+                for nav in nav_elements:
                     navigation_type = _epub_nav_type(nav)
                     last_by_depth: dict[int, str] = {}
                     for link in nav.find_all('a', href=True):
@@ -791,7 +1294,7 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                         )
             else:
                 try:
-                    root = ET.fromstring(data)
+                    root = ET.fromstring(navigation_data)
                 except ET.ParseError as exc:
                     result.blockers.append({'kind': 'epub_navigation_malformed', 'manifest_id': item_id, 'message': str(exc)})
                     continue
@@ -815,6 +1318,13 @@ def extract_epub_v2(source: Path, work: Path, policy: RestorePolicy) -> Extracti
                         walk_ncx(point.findall('./{*}navPoint'), depth + 1, candidate_id)
 
                 nav_map = root.find('.//{*}navMap')
+                record_navigation_surface(
+                    semantic_status=(
+                        'parsed_authoritative_ncx' if nav_map is not None
+                        else 'ncx_navmap_missing'
+                    ),
+                    fallback=None,
+                )
                 if nav_map is not None:
                     walk_ncx(nav_map.findall('./{*}navPoint'), 1, None)
     return result

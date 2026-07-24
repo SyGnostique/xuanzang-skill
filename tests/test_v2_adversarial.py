@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from xuanzang.gates import RESOLUTION_METHODS
+
 
 REPO = Path(__file__).resolve().parents[1]
 FIXED_REVIEW_TIME = '2026-01-01T00:00:00Z'
@@ -170,6 +172,192 @@ def blocker_codes(package: Path, target: str = 'citation') -> set[str]:
         str(row['code'])
         for row in read_json(package / 'audit' / 'gates' / f'{target}.json')['hard_blockers']
     }
+
+
+def test_agent_semantic_visual_resolution_methods_remain_typed_and_fail_closed() -> None:
+    assert RESOLUTION_METHODS['sidecar_provenance_requires_review'] == {
+        'producer_manifest_verified', 'producer_manifest_cryptographically_verified',
+    }
+    assert RESOLUTION_METHODS['multi_column_reading_order_requires_review'] == {
+        'reading_order_verified', 'canonical_order_corrected',
+    }
+    assert RESOLUTION_METHODS['mixed_visual_region_requires_reconciliation'] == {
+        'visual_regions_reconciled',
+    }
+    assert RESOLUTION_METHODS['low_ocr_confidence_unresolved'] == {
+        'visual_transcription_verified', 'replacement_evidence_selected',
+    }
+    assert RESOLUTION_METHODS['visual_only_page_requires_rendered_evidence'] == {
+        'rendered_rendition_attached',
+    }
+
+
+def test_agent_sidecar_manifest_requires_full_cryptographic_binding(tmp_path: Path) -> None:
+    image = tmp_path / 'page.png'
+    Image.new('RGB', (160, 100), color=(120, 130, 140)).save(image)
+    image_sha = sha256_file(image)
+    sidecar = tmp_path / 'sidecar.json'
+    write_json(sidecar, {
+        'engine': 'Bound-OCR', 'engine_version': '7',
+        'blocks': [{
+            'page_id': 'page_0001', 'text': 'cryptographically bound sidecar evidence',
+            'bbox': [0, 0, 120, 80], 'confidence': 0.99,
+            'source_image_sha256': image_sha,
+        }],
+    })
+    package = tmp_path / 'sidecar-package'
+    stdout_json(run_cli(
+        'restore', str(image), '--out', str(package), '--target', 'review',
+        '--ocr', 'sidecar', '--sidecar', str(sidecar),
+    ))
+    manifest = read_json(package / 'package_manifest.json')
+    run_manifest = read_json(package / 'runs' / manifest['active_run_id'] / 'run_manifest.json')
+    surface = read_jsonl(package / 'ledger' / 'surfaces.jsonl')[0]
+    producer_manifest_path = package / 'audit' / 'ocr_producer_manifest.json'
+    write_json(producer_manifest_path, {
+        'status': 'complete',
+        'input_sha256': run_manifest['external_input_digests']['ocr_sidecar']['sha256'],
+        'row_count': 1,
+        'page_count': 1,
+        'producers': [{'engine': 'Bound-OCR', 'versions': ['7']}],
+        'pages': [{
+            'page_id': 'page_0001', 'source_image_sha256': surface['page_image_sha256'],
+            'row_count': 1,
+        }],
+    })
+    decisions = semantic_decisions(package)
+    page = next(row for row in decisions if row['kind'] == 'page')
+    page['reviewer_type'] = 'agent_semantic'
+    page.update({
+        'resolves': ['sidecar_provenance_requires_review'],
+        'resolution_evidence': [{
+            'code': 'sidecar_provenance_requires_review',
+            'method': 'producer_manifest_cryptographically_verified',
+            'verified': True,
+            'manifest_path': 'audit/ocr_producer_manifest.json',
+            'manifest_sha256': sha256_file(producer_manifest_path),
+            'input_sha256': run_manifest['external_input_digests']['ocr_sidecar']['sha256'],
+        }],
+    })
+    apply_decisions(package, tmp_path / 'bound-review.json', decisions)
+    unresolved_blocker = next((
+        row for row in read_json(package / 'audit' / 'gates' / 'citation.json')['hard_blockers']
+        if row['code'] == 'unresolved_extraction_finding'
+    ), None)
+    unresolved = unresolved_blocker['observed'] if unresolved_blocker else []
+    assert not any(row['kind'] == 'sidecar_provenance_requires_review' for row in unresolved)
+
+    producer_manifest = read_json(producer_manifest_path)
+    producer_manifest['row_count'] = 2
+    write_json(producer_manifest_path, producer_manifest)
+    active_page = next(
+        row for row in read_jsonl(package / 'ledger' / 'review_decisions_active.jsonl')
+        if row['kind'] == 'page'
+    )
+    tampered = {
+        **{key: value for key, value in page.items() if key != 'created_at'},
+        'supersedes': [active_page['decision_id']],
+        'resolution_evidence': [{
+            **page['resolution_evidence'][0],
+            'manifest_sha256': sha256_file(producer_manifest_path),
+        }],
+    }
+    apply_decisions(package, tmp_path / 'tampered-review.json', [tampered])
+    unresolved = next(
+        row for row in read_json(package / 'audit' / 'gates' / 'citation.json')['hard_blockers']
+        if row['code'] == 'unresolved_extraction_finding'
+    )['observed']
+    assert any(row['kind'] == 'sidecar_provenance_requires_review' for row in unresolved)
+
+
+def test_agent_visual_verification_uses_only_active_canonical_evidence(tmp_path: Path) -> None:
+    image = tmp_path / 'page.png'
+    Image.new('RGB', (160, 100), color=(120, 130, 140)).save(image)
+    image_sha = sha256_file(image)
+    sidecar = tmp_path / 'sidecar.json'
+    write_json(sidecar, {
+        'engine': 'Bound-OCR', 'engine_version': '7',
+        'blocks': [
+            {
+                'page_id': 'page_0001', 'text': 'unsupported OCR noise',
+                'bbox': [110, 50, 150, 90], 'confidence': 0.01,
+                'source_image_sha256': image_sha,
+            },
+        ],
+    })
+    package = tmp_path / 'sidecar-package'
+    stdout_json(run_cli(
+        'restore', str(image), '--out', str(package), '--target', 'review',
+        '--ocr', 'sidecar', '--sidecar', str(sidecar),
+    ))
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    low_evidence = next(row for row in evidence if row['confidence'] < 0.1)
+    low_block = next(
+        row for row in read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+        if row['evidence_id'] == low_evidence['evidence_id']
+    )
+    exclusion = {
+        'kind': 'canonical_block', 'target_id': low_block['block_id'],
+        'action': 'exclude_block', 'disposition': 'excluded',
+        'semantic_reading': True, 'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer', 'created_at': FIXED_REVIEW_TIME,
+        'reason': 'Full-resolution visual review confirms the low-confidence OCR block has no source glyph counterpart.',
+    }
+    apply_decisions(package, tmp_path / 'exclude-noise.json', [exclusion])
+    surface = read_jsonl(package / 'ledger' / 'surfaces.jsonl')[0]
+    active = [
+        row for row in read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+        if row.get('canonical_disposition') != 'excluded'
+    ]
+    active_evidence_ids = [row['evidence_id'] for row in active]
+    page = {
+        'kind': 'page', 'target_id': surface['page_id'], 'disposition': 'reviewed',
+        'semantic_reading': True, 'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer', 'created_at': FIXED_REVIEW_TIME,
+        'resolves': ['low_ocr_confidence_unresolved'],
+        'resolution_evidence': [{
+            'code': 'low_ocr_confidence_unresolved',
+            'method': 'visual_transcription_verified', 'verified': True,
+            'artifact_path': surface['page_image_path'],
+            'sha256': surface['page_image_sha256'],
+            'evidence_ids': active_evidence_ids,
+        }],
+        'reason': 'The active source text and excluded OCR noise were reviewed against the full-resolution image.',
+    }
+    apply_decisions(package, tmp_path / 'verify-active-evidence.json', [page])
+
+    unresolved = next(
+        row for row in read_json(package / 'audit' / 'gates' / 'citation.json')['hard_blockers']
+        if row['code'] == 'unresolved_extraction_finding'
+    )['observed']
+    assert not any(row['kind'] == 'low_ocr_confidence_unresolved' for row in unresolved)
+
+
+def test_active_review_projection_materializes_only_latest_target_decision(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=1)
+    restore_markdown(source, package)
+    decisions = semantic_decisions(package)
+    apply_decisions(package, tmp_path / 'initial.json', decisions)
+    prior = next(
+        row for row in read_jsonl(package / 'ledger' / 'review_decisions_active.jsonl')
+        if row['kind'] == 'page'
+    )
+    revised = {
+        **{key: value for key, value in prior.items() if key not in {
+            'decision_id', 'decision_hash', 'previous_decision_hash', 'created_at',
+        }},
+        'supersedes': [prior['decision_id']],
+        'reason': 'A second complete semantic pass supersedes the earlier page decision.',
+        'created_at': FIXED_REVIEW_TIME,
+    }
+    apply_decisions(package, tmp_path / 'revised.json', [revised])
+
+    active = read_jsonl(package / 'ledger' / 'review_decisions_active.jsonl')
+    page_rows = [row for row in active if row['kind'] == 'page' and row['target_id'] == prior['target_id']]
+    assert len(page_rows) == 1
+    assert page_rows[0]['supersedes'] == [prior['decision_id']]
 
 
 def test_bundle_manifest_cannot_self_authorize_external_sources(tmp_path: Path) -> None:
@@ -926,6 +1114,228 @@ def test_reviewed_reorder_preserves_raw_blocks_and_creates_bound_projection(tmp_
     )[:20]
 
 
+def test_reviewed_cross_surface_resegmentation_is_exact_and_reversible(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=3)
+    restore_markdown(source, package)
+    raw_path = package / 'ledger' / 'canonical_blocks.jsonl'
+    raw_before = raw_path.read_bytes()
+    blocks = read_jsonl(raw_path)
+    first, third = blocks[0], blocks[2]
+    joined_text = f"{first['text']} {third['text']}"
+    decision = {
+        'kind': 'canonical_block',
+        'target_id': first['block_id'],
+        'action': 'resegment_blocks_across_surfaces',
+        'source_block_ids': [third['block_id']],
+        'segments': [{
+            'text': joined_text,
+            'block_kind': 'text_candidate',
+            'source_spans': [
+                {'block_id': first['block_id'], 'start_offset': 0, 'end_offset': len(first['text'])},
+                {'block_id': third['block_id'], 'start_offset': 0, 'end_offset': len(third['text'])},
+            ],
+        }],
+        'disposition': 'selected',
+        'semantic_reading': True,
+        'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer',
+        'created_at': FIXED_REVIEW_TIME,
+        'reason': 'Visual review confirmed one sentence split by an intervening full-page float.',
+    }
+
+    apply_decisions(package, tmp_path / 'resegment.json', [decision])
+    reviewed = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+
+    assert reviewed[0]['text'] == joined_text
+    assert reviewed[0]['selection_status'] == 'reviewed_resegmentation'
+    assert [span['block_id'] for span in reviewed[0]['source_spans']] == [
+        first['block_id'], third['block_id'],
+    ]
+    assert reviewed[1]['block_id'] == blocks[1]['block_id']
+    assert raw_path.read_bytes() == raw_before
+
+
+def test_reviewed_reorder_can_skip_explicitly_excluded_noise(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=3)
+    restore_markdown(source, package)
+    blocks = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    assert len(blocks) >= 3
+    decisions = [
+        {
+            'kind': 'canonical_block',
+            'target_id': blocks[0]['block_id'],
+            'action': 'reorder_blocks',
+            'ordered_block_ids': [blocks[2]['block_id'], blocks[0]['block_id']],
+            'disposition': 'selected',
+            'semantic_reading': True,
+            'reviewer_type': 'agent_semantic',
+            'reviewer_id': 'adversarial-fixture-reviewer',
+            'created_at': FIXED_REVIEW_TIME,
+            'reason': 'Visual review established that the middle OCR block is noise between two valid blocks.',
+        },
+        {
+            'kind': 'canonical_block',
+            'target_id': blocks[1]['block_id'],
+            'action': 'exclude_block',
+            'disposition': 'excluded',
+            'semantic_reading': True,
+            'reviewer_type': 'agent_semantic',
+            'reviewer_id': 'adversarial-fixture-reviewer',
+            'created_at': FIXED_REVIEW_TIME,
+            'reason': 'Full-resolution visual review confirms this OCR block has no source glyph counterpart.',
+        },
+    ]
+
+    apply_decisions(package, tmp_path / 'reorder-with-noise.json', decisions)
+    reviewed = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+    active = [row['block_id'] for row in reviewed if row.get('canonical_disposition') != 'excluded']
+
+    assert active[:2] == [blocks[2]['block_id'], blocks[0]['block_id']]
+    excluded = next(row for row in reviewed if row['block_id'] == blocks[1]['block_id'])
+    assert excluded['canonical_disposition'] == 'excluded'
+
+
+def test_reviewed_reorder_preserves_member_text_corrections(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=3)
+    restore_markdown(source, package)
+    blocks = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    corrected = f"{blocks[1]['text']} corrected"
+    decisions = [
+        {
+            'kind': 'canonical_block',
+            'target_id': blocks[0]['block_id'],
+            'action': 'reorder_blocks',
+            'ordered_block_ids': [blocks[1]['block_id'], blocks[0]['block_id'], blocks[2]['block_id']],
+            'disposition': 'selected',
+            'semantic_reading': True,
+            'reviewer_type': 'agent_semantic',
+            'reviewer_id': 'adversarial-fixture-reviewer',
+            'created_at': FIXED_REVIEW_TIME,
+            'reason': 'Visual review established a corrected first paragraph followed by the remaining source order.',
+        },
+        {
+            'kind': 'canonical_block',
+            'target_id': blocks[1]['block_id'],
+            'action': 'correct_text',
+            'corrected_text': corrected,
+            'disposition': 'selected',
+            'semantic_reading': True,
+            'reviewer_type': 'agent_semantic',
+            'reviewer_id': 'adversarial-fixture-reviewer',
+            'created_at': FIXED_REVIEW_TIME,
+            'reason': 'Visual review resolves a source glyph omitted by OCR.',
+        },
+    ]
+
+    apply_decisions(package, tmp_path / 'reorder-with-correction.json', decisions)
+    reviewed = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+
+    assert reviewed[0]['block_id'] == blocks[1]['block_id']
+    assert reviewed[0]['text'] == corrected
+    assert reviewed[0]['selection_status'] == 'reviewed_correction'
+    assert reviewed[0]['reorder_decision_id']
+    assert reviewed[1]['selection_status'] == 'reviewed_reorder'
+
+
+def test_reviewed_reorder_preserves_superseded_target_text_correction(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=3)
+    restore_markdown(source, package)
+    blocks = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    corrected = f"{blocks[0]['text']} corrected"
+    correction = {
+        'kind': 'canonical_block',
+        'target_id': blocks[0]['block_id'],
+        'action': 'correct_text',
+        'corrected_text': corrected,
+        'disposition': 'selected',
+        'semantic_reading': True,
+        'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer',
+        'created_at': FIXED_REVIEW_TIME,
+        'reason': 'Full-resolution visual review resolves a source glyph omitted by OCR.',
+    }
+    apply_decisions(package, tmp_path / 'target-correction.json', [correction])
+    correction_decision = read_jsonl(package / 'ledger' / 'review_decisions.jsonl')[-1]
+    reorder = {
+        'kind': 'canonical_block',
+        'target_id': blocks[0]['block_id'],
+        'action': 'reorder_blocks',
+        'ordered_block_ids': [blocks[1]['block_id'], blocks[0]['block_id'], blocks[2]['block_id']],
+        'preserved_target_correction': {
+            'decision_id': correction_decision['decision_id'],
+            'corrected_text': corrected,
+        },
+        'supersedes': [correction_decision['decision_id']],
+        'disposition': 'selected',
+        'semantic_reading': True,
+        'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer',
+        'created_at': FIXED_REVIEW_TIME,
+        'reason': 'Visual review establishes the page order while preserving the target glyph correction.',
+    }
+
+    apply_decisions(package, tmp_path / 'target-reorder.json', [reorder])
+    reviewed = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+    target = next(row for row in reviewed if row['block_id'] == blocks[0]['block_id'])
+
+    assert target['text'] == corrected
+    assert target['selection_status'] == 'reviewed_correction'
+    assert target['review_decision_id'] == correction_decision['decision_id']
+    assert target['reorder_decision_id']
+
+
+def test_reviewed_reorder_rejects_silent_loss_of_target_text_correction(tmp_path: Path) -> None:
+    source = tmp_path / 'source.md'
+    package = tmp_path / 'package'
+    make_markdown(source, paragraphs=3)
+    restore_markdown(source, package)
+    blocks = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    correction = {
+        'kind': 'canonical_block',
+        'target_id': blocks[0]['block_id'],
+        'action': 'correct_text',
+        'corrected_text': f"{blocks[0]['text']} corrected",
+        'disposition': 'selected',
+        'semantic_reading': True,
+        'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer',
+        'created_at': FIXED_REVIEW_TIME,
+        'reason': 'Full-resolution visual review resolves a source glyph omitted by OCR.',
+    }
+    apply_decisions(package, tmp_path / 'target-correction.json', [correction])
+    correction_id = read_jsonl(package / 'ledger' / 'review_decisions.jsonl')[-1]['decision_id']
+    reorder = {
+        'kind': 'canonical_block',
+        'target_id': blocks[0]['block_id'],
+        'action': 'reorder_blocks',
+        'ordered_block_ids': [blocks[1]['block_id'], blocks[0]['block_id'], blocks[2]['block_id']],
+        'supersedes': [correction_id],
+        'disposition': 'selected',
+        'semantic_reading': True,
+        'reviewer_type': 'agent_semantic',
+        'reviewer_id': 'adversarial-fixture-reviewer',
+        'created_at': FIXED_REVIEW_TIME,
+        'reason': 'This invalid fixture would silently discard the target correction.',
+    }
+
+    decisions_path = tmp_path / 'target-reorder-without-preservation.json'
+    write_json(decisions_path, {'decisions': [reorder]})
+    result = run_cli(
+        'review', str(package), '--decisions', str(decisions_path), check=False,
+    )
+
+    assert result.returncode == 4
+    assert 'must preserve the target correction explicitly' in (result.stdout + result.stderr)
+
+
 def test_structure_review_is_partitioned_bound_and_exported_with_all_semantic_assets(tmp_path: Path) -> None:
     bundle = tmp_path / 'bundle'
     bundle.mkdir()
@@ -1021,6 +1431,56 @@ def test_structure_review_is_partitioned_bound_and_exported_with_all_semantic_as
     status = stdout_json(run_cli('status', str(package)))
     assert status['gate_status'] == 'FAIL_REVIEW'
     assert 'toc_projection_mismatch' in blocker_codes(package)
+
+
+def test_local_strict_acceptance_binds_revision_and_markdown_contract(tmp_path: Path) -> None:
+    bundle = tmp_path / 'bundle'
+    bundle.mkdir()
+    make_markdown(bundle / 'chapter-a.md', paragraphs=1)
+    make_markdown(bundle / 'chapter-b.md', paragraphs=1)
+    write_json(bundle / 'manifest.json', {
+        'sources': [
+            {'source_id': 'chapter-a', 'locator': 'chapter-a.md', 'order': 1},
+            {'source_id': 'chapter-b', 'locator': 'chapter-b.md', 'order': 2},
+        ],
+    })
+    package = tmp_path / 'package'
+    stdout_json(run_cli(
+        'restore', str(bundle / 'manifest.json'), '--out', str(package),
+        '--target', 'review', '--ocr', 'none',
+    ))
+    decisions = semantic_decisions(package)
+    structure = next(row for row in decisions if row['kind'] == 'structure')
+    structure['document_title'] = 'Fixture Book'
+    reviewed = stdout_json(apply_decisions(package, tmp_path / 'decisions.json', decisions))
+    assert reviewed['gate_status'] == 'PASS_STRICT'
+
+    exported = tmp_path / 'export'
+    stdout_json(run_cli('publish', str(package), '--target', 'citation', '--out', str(exported)))
+    markdown = (exported / 'document.md').read_text(encoding='utf-8')
+    headings = [line for line in markdown.splitlines() if line.startswith('#')]
+    assert headings[0] == '# Fixture Book'
+    assert headings.count('# Fixture Book') == 1
+    assert '## Document' in headings
+    assert not any(line.startswith('####') for line in headings)
+
+    accepted = stdout_json(run_cli(
+        'verify-local-strict', str(package), '--export', str(exported),
+    ))
+    assert accepted['status'] == 'PASS_STRICT'
+    assert accepted['failure_count'] == 0
+    assert read_json(exported / 'local_strict_acceptance.json')['status'] == 'PASS_STRICT'
+
+    (exported / 'document.md').write_text(markdown + '\n#### injected heading\n', encoding='utf-8')
+    rejected = run_cli(
+        'verify-local-strict', str(package), '--export', str(exported), check=False,
+    )
+    assert rejected.returncode == 2
+    report = stdout_json(rejected)
+    assert report['status'] == 'FAIL_REVIEW'
+    assert {row['code'] for row in report['failures']} >= {
+        'artifact_hash_mismatch', 'markdown_heading_too_deep',
+    }
 
 
 def test_resolution_assertions_cannot_clear_bad_image_hash(tmp_path: Path) -> None:

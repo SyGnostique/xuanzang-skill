@@ -9,8 +9,13 @@ secret_patterns = [
     re.compile(r'(OPENAI|DEEPSEEK|ZHIPU)_API_KEY\s*=\s*["\']?(?!your_key|YOUR_KEY|你的密钥|<)[A-Za-z0-9_-]{12,}'),
 ]
 failures = []
+ignored_dirs = {
+    '.git', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache',
+    '.ruff_cache', 'build', 'dist', 'feedback', 'packages', 'translation_packages',
+    'translation_runs', 'raw_responses', 'output',
+}
 for p in Path('.').rglob('*'):
-    if '.git' in p.parts or p.is_dir():
+    if any(part in ignored_dirs for part in p.parts) or p.is_dir():
         continue
     if p.suffix.lower() in forbidden_ext and 'tests' not in p.parts:
         failures.append(f'forbidden generated/private file: {p}')

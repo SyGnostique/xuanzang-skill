@@ -25,6 +25,10 @@ A score without cited evidence is capped at 90. Strong performance in one dimens
 
 This score controls advancement inside the prompt/reconstruction implementation loop only. It has no v2 package-trust authority and cannot establish `citation_grade` or `PASS_STRICT`. Accepted decisions must enter the revision-bound v2 review ledger and pass the current target-specific gate.
 
+## Scored Content Boundary
+
+Score informational chapters, case studies, technical appendices, definitions, meaningful notes, and the media/objects required to understand them. Contributor rosters, acknowledgments, dedications, publication/copyright/cataloging matter, promotional cover copy, repeated title matter, author biographies, duplicate printed Contents, and non-informational index/locator text are outside the score and require no repair or citation-chunk materialization.
+
 ## Dimensions
 
 | Dimension | Weight | Full-score condition |
@@ -46,7 +50,7 @@ This score controls advancement inside the prompt/reconstruction implementation 
 
 | Hard blocker | Maximum score |
 |---|---:|
-| Missing real body or backmatter node | 60 |
+| Missing real informational body or scored informative backmatter node | 60 |
 | Invented TOC node | 70 |
 | Incomplete TOC page coverage | 75 |
 | Low-confidence canonical TOC item | 80 |

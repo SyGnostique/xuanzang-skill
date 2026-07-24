@@ -12,6 +12,7 @@ In a v2 evidence package, prompt output is a review proposal. Convert accepted T
 - Before splitting: load candidate assessment, exact boundary resolution, and media affiliation prompts.
 - After splitting: load exhaustive split audit and reverse structure audit prompts.
 - On any blocker: load evidence-bounded revision, rerun dependent audits, then load stage scoring.
+- After every formal score: load `score_feedback_learning.prompt.md`, preserve the raw score privately, and separate current-book repairs from sanitized generalizable proposals with regression tests.
 
 Do not replace the protocol with a generic request such as "find the chapters" or "clean this TOC." Each role has a separate trust boundary and output artifact.
 
@@ -23,6 +24,10 @@ Do not replace the protocol with a generic request such as "find the chapters" o
 - A weaker or text-only model may harvest and classify obvious candidates but must not grant `PASS_STRICT` when visual evidence is required.
 
 No model grants `PASS_STRICT` directly. Only the current v2 package gate can establish citation eligibility after accepted decisions are materialized and integrity-checked.
+
+The next independent scorer must not inherit a desired verdict from the prior score. Provide changed artifact paths and neutral recheck requirements only.
+
+Before formal scoring, declare the scored-content boundary. Score informational chapters, case studies, technical appendices, definitions, meaningful notes, and necessary media/objects. Do not repair or score contributor rosters, acknowledgments, dedications, publication/copyright/cataloging matter, promotional cover copy, repeated title pages, author biographies, duplicate printed Contents, or non-informational index/locator text.
 
 ## Privacy
 

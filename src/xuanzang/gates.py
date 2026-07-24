@@ -18,9 +18,13 @@ REQUIRED_RUN_ARTIFACTS = {
 
 RESOLUTION_METHODS = {
     'sidecar_source_image_unverified': {'source_image_hash_verified', 'replacement_evidence_selected'},
-    'sidecar_provenance_requires_review': {'producer_manifest_verified'},
+    'sidecar_provenance_requires_review': {
+        'producer_manifest_verified', 'producer_manifest_cryptographically_verified',
+    },
     'external_ocr_source_image_unverified': {'source_image_hash_verified', 'replacement_evidence_selected'},
-    'external_ocr_provenance_requires_review': {'producer_manifest_verified'},
+    'external_ocr_provenance_requires_review': {
+        'producer_manifest_verified', 'producer_manifest_cryptographically_verified',
+    },
     'ocr_bbox_invalid': {'corrected_bbox_attached', 'block_quarantined'},
     'legacy_ocr_bbox_invalid': {'corrected_bbox_attached', 'block_quarantined'},
     'mixed_visual_region_requires_reconciliation': {'visual_regions_reconciled'},
@@ -32,6 +36,7 @@ RESOLUTION_METHODS = {
     'equation_representation_requires_review': {'visual_representation_verified'},
     'fixed_layout_requires_rendered_evidence': {'rendered_rendition_attached'},
     'visual_only_spine_requires_rendered_evidence': {'rendered_rendition_attached'},
+    'visual_only_page_requires_rendered_evidence': {'rendered_rendition_attached'},
     'epub_navigation_target_unresolved': {'navigation_target_reconciled'},
     'local_conversion_requires_review': {'source_and_rendition_compared'},
     'external_image_reference_requires_review': {'asset_ingested_and_hashed', 'asset_quarantined'},
@@ -50,6 +55,7 @@ HINT_TOLERABLE_FINDINGS = {
     'textbox_reading_order_requires_review', 'equation_representation_requires_review',
     'fixed_layout_requires_rendered_evidence', 'local_conversion_requires_review',
     'visual_only_spine_requires_rendered_evidence', 'epub_navigation_target_unresolved',
+    'visual_only_page_requires_rendered_evidence',
     'external_image_reference_requires_review', 'unsafe_relationship_target',
     'missing_image_asset', 'book_m1_image_missing', 'ocr_failure',
 }
@@ -78,10 +84,14 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
     pages = read_jsonl(package / 'ledger' / 'surfaces.jsonl') or read_jsonl(package / 'ledger' / 'pages.jsonl')
     evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
     raw_canonical = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
-    canonical = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl') or raw_canonical
+    canonical_projection = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl') or raw_canonical
+    canonical = [
+        row for row in canonical_projection
+        if row.get('canonical_disposition') != 'excluded'
+    ]
     paragraphs = read_jsonl(package / 'ledger' / 'paragraph_candidates_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'paragraph_candidates.jsonl')
-    assets = read_jsonl(package / 'ledger' / 'assets.jsonl')
-    objects = read_jsonl(package / 'ledger' / 'objects.jsonl')
+    assets = read_jsonl(package / 'ledger' / 'assets_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'assets.jsonl')
+    objects = read_jsonl(package / 'ledger' / 'objects_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'objects.jsonl')
     extraction = read_json(package / 'audit' / 'extraction_audit.json')
     decisions = _latest_decisions(package, manifest)
     page_by_id = {str(row.get('page_id')): row for row in pages}
@@ -143,7 +153,9 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
             source_metadata.get('spine_occurrence_count')
             or len(source_metadata.get('opf', {}).get('spine', []))
         )
-        observed_spine_indexes = [int(row.get('spine_index', 0)) for row in pages]
+        observed_spine_indexes = [
+            int(row.get('spine_index', 0)) for row in pages if row.get('spine_index') is not None
+        ]
         check(
             'epub_spine_surface_accounting',
             expected_spine_count > 0 and observed_spine_indexes == list(range(1, expected_spine_count + 1)),
@@ -193,6 +205,20 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
         observed=observed_review_root, expected=manifest.get('review_ledger_sha256'),
         blocker='review_ledger_binding_mismatch',
     )
+    for projection_name, manifest_field in (
+        ('assets_reviewed.jsonl', 'asset_projection_sha256'),
+        ('objects_reviewed.jsonl', 'object_projection_sha256'),
+        ('review_decisions_active.jsonl', 'active_review_projection_sha256'),
+    ):
+        projection_path = package / 'ledger' / projection_name
+        if projection_path.exists():
+            observed_projection = sha256_file(projection_path)
+            check(
+                f'{projection_name}_binding',
+                manifest.get(manifest_field) == observed_projection,
+                observed=observed_projection, expected=manifest.get(manifest_field),
+                blocker='review_projection_binding_mismatch',
+            )
     review_chain_issues = []
     chain_head = sha256_text(f'review-genesis|{manifest.get("package_id")}')
     for index, decision in enumerate(read_jsonl(review_ledger_path), start=1):
@@ -381,22 +407,33 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
         'legacy_chapter_boundaries_require_v2_structure_review',
     }
 
+    bound_file_cache: dict[tuple[str, str], bool] = {}
+
     def bound_file(locator: Any, expected_sha: Any) -> bool:
-        if not locator or not re.fullmatch(r'[0-9a-f]{64}', str(expected_sha or '')):
+        key = (str(locator or ''), str(expected_sha or ''))
+        if key in bound_file_cache:
+            return bound_file_cache[key]
+        if not locator or not re.fullmatch(r'[0-9a-f]{64}', key[1]):
+            bound_file_cache[key] = False
             return False
         rel = Path(str(locator))
         if rel.is_absolute() or '..' in rel.parts:
+            bound_file_cache[key] = False
             return False
         unresolved = package / rel
         resolved = unresolved.resolve()
         if resolved != package and package not in resolved.parents:
+            bound_file_cache[key] = False
             return False
         cursor = unresolved
         while cursor != package and package in cursor.parents:
             if cursor.is_symlink():
+                bound_file_cache[key] = False
                 return False
             cursor = cursor.parent
-        return resolved.is_file() and sha256_file(resolved) == expected_sha
+        result = resolved.is_file() and sha256_file(resolved) == expected_sha
+        bound_file_cache[key] = result
+        return result
 
     def finding_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
         out = []
@@ -475,6 +512,75 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
                 and resolution.get('input_sha256') == external_input.get('sha256')
                 and re.fullmatch(r'[0-9a-f]{64}', str(resolution.get('input_sha256') or ''))
             )
+        if method == 'producer_manifest_cryptographically_verified':
+            if decision.get('reviewer_type') != 'agent_semantic':
+                return False
+            manifest_path = resolution.get('manifest_path')
+            manifest_sha = resolution.get('manifest_sha256')
+            if not bound_file(manifest_path, manifest_sha):
+                return False
+            producer_manifest = read_json(package / str(manifest_path))
+            external_input = run_manifest.get('external_input_digests', {}).get('ocr_sidecar', {})
+            input_sha = str(resolution.get('input_sha256') or '')
+            if not (
+                producer_manifest.get('status') == 'complete'
+                and re.fullmatch(r'[0-9a-f]{64}', input_sha)
+                and input_sha == external_input.get('sha256')
+                and input_sha == producer_manifest.get('input_sha256')
+            ):
+                return False
+
+            sidecar_evidence = [row for row in evidence if row.get('engine') == finding.get('adapter_name', 'sidecar')]
+            if not sidecar_evidence:
+                sidecar_evidence = [row for row in evidence if row.get('engine') == 'sidecar']
+            if (
+                int(producer_manifest.get('row_count', -1)) != len(sidecar_evidence)
+                or int(producer_manifest.get('page_count', -1)) != len(page_by_id)
+            ):
+                return False
+
+            actual_producers: dict[str, set[str]] = {}
+            for row in sidecar_evidence:
+                producer = (row.get('metadata') or {}).get('sidecar_producer', {})
+                engine = str(producer.get('claimed_engine') or '')
+                version = str(producer.get('claimed_version') or '')
+                if not engine or not version or not external_anchor_valid(row):
+                    return False
+                actual_producers.setdefault(engine, set()).add(version)
+            declared_producers = {
+                str(row.get('engine')): {str(value) for value in row.get('versions', [])}
+                for row in producer_manifest.get('producers', []) if isinstance(row, dict)
+            }
+            if actual_producers != declared_producers:
+                return False
+
+            manifest_pages = {
+                str(row.get('page_id')): row
+                for row in producer_manifest.get('pages', []) if isinstance(row, dict)
+            }
+            if set(manifest_pages) != set(page_by_id):
+                return False
+            evidence_counts = Counter(str(row.get('page_id')) for row in sidecar_evidence)
+            for manifest_page_id, manifest_page in manifest_pages.items():
+                surface = page_by_id[manifest_page_id]
+                if not (
+                    manifest_page.get('source_image_sha256') == surface.get('page_image_sha256')
+                    and int(manifest_page.get('row_count', -1)) == evidence_counts.get(manifest_page_id, 0)
+                    and bound_file(surface.get('page_image_path'), surface.get('page_image_sha256'))
+                ):
+                    return False
+
+            page_evidence = [row for row in sidecar_evidence if str(row.get('page_id')) == page_id]
+            manifest_page = manifest_pages.get(page_id, {})
+            return bool(
+                page_evidence
+                and int(manifest_page.get('row_count', -1)) == len(page_evidence)
+                and set(finding.get('producer_engine_claims', []))
+                == {
+                    str((row.get('metadata') or {}).get('sidecar_producer', {}).get('claimed_engine'))
+                    for row in page_evidence
+                }
+            )
         if method in {'rendered_rendition_attached', 'visual_representation_verified'}:
             page = page_by_id.get(page_id, {})
             return bool(
@@ -496,21 +602,68 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
         if method in {'reading_order_verified', 'canonical_order_corrected'}:
             ordered = [str(value) for value in resolution.get('ordered_block_ids', [])]
             actual = [str(row.get('block_id')) for row in canonical_by_page.get(page_id, [])]
-            if not ordered or ordered != actual:
+            # An explicitly reviewed empty order is valid when the page's
+            # active canonical projection is also empty (for example, a
+            # full-page visual whose OCR candidates were all quarantined).
+            if ordered != actual:
                 return False
             if method == 'canonical_order_corrected':
                 return any(row.get('selection_status') == 'reviewed_reorder' for row in canonical_by_page.get(page_id, []))
-            return decision.get('reviewer_type') == 'human'
+            page = page_by_id.get(page_id, {})
+            visual_anchor_bound = bool(
+                resolution.get('artifact_path') == page.get('page_image_path')
+                and resolution.get('sha256') == page.get('page_image_sha256')
+                and bound_file(page.get('page_image_path'), page.get('page_image_sha256'))
+            )
+            return bool(
+                decision.get('reviewer_type') in {'human', 'agent_semantic'}
+                and decision.get('semantic_reading') and visual_anchor_bound
+            )
         if method in {'visual_regions_reconciled', 'visual_transcription_verified', 'accepted_view_selected', 'alternate_variants_preserved'}:
+            page = page_by_id.get(page_id, {})
+            visual_anchor_bound = bool(
+                resolution.get('artifact_path') == page.get('page_image_path')
+                and resolution.get('sha256') == page.get('page_image_sha256')
+                and bound_file(page.get('page_image_path'), page.get('page_image_sha256'))
+            )
+            region_map = resolution.get('region_map')
             if method == 'visual_regions_reconciled' and (
-                not isinstance(resolution.get('region_map'), list) or not resolution.get('region_map')
+                not isinstance(region_map, list) or not region_map
             ):
                 return False
-            return bool(
-                decision.get('reviewer_type') == 'human' and referenced
+            page_canonical_ids = {
+                str(row.get('evidence_id')) for row in canonical_by_page.get(page_id, [])
+                if row.get('evidence_id')
+            }
+            complete_reference_set = bool(referenced) or (
+                not referenced_ids and not page_canonical_ids
+            )
+            base_verified = bool(
+                decision.get('reviewer_type') in {'human', 'agent_semantic'}
+                and decision.get('semantic_reading') and visual_anchor_bound and complete_reference_set
                 and all(str(row.get('page_id')) == page_id for row in referenced)
                 and set(referenced_ids).issubset(canonical_evidence_ids)
             )
+            if not base_verified or decision.get('reviewer_type') == 'human':
+                return base_verified
+            if set(referenced_ids) != page_canonical_ids:
+                return False
+            if method == 'visual_regions_reconciled':
+                mapped_ids = {
+                    str(evidence_id)
+                    for region in region_map if isinstance(region, dict)
+                    for evidence_id in region.get('evidence_ids', [])
+                }
+                if (
+                    mapped_ids != set(referenced_ids)
+                    or any(
+                        not isinstance(region, dict) or not region.get('role')
+                        or region.get('disposition') not in {'retained', 'excluded', 'reference_only'}
+                        for region in region_map
+                    )
+                ):
+                    return False
+            return True
         if method == 'source_and_rendition_compared':
             conversion = manifest.get('profile', {}).get('conversion', {}) or read_json(package / 'source' / 'source_inventory.json').get('metadata', {}).get('conversion', {})
             return bool(
@@ -555,9 +708,39 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
         code = finding.get('kind') if isinstance(finding, dict) else str(finding)
         if code in delegated_to_v2_gates:
             continue
-        if target == 'hint' and code in HINT_TOLERABLE_FINDINGS:
-            warnings.append({'code': 'hint_unresolved_extraction_finding', 'finding': finding})
-            continue
+        if code == 'epub_navigation_unsafe_xml' and manifest.get('source', {}).get('format') == 'epub':
+            unsafe_manifest_id = str(finding.get('manifest_id') or '')
+            safe_navigation_documents = [
+                row for row in (inventory.get('metadata', {}).get('navigation_documents', []) or [])
+                if str(row.get('manifest_id') or '') != unsafe_manifest_id
+                and row.get('navigation_kind') in {'epub3_nav', 'epub2_ncx'}
+            ]
+            safe_candidate_sources = {
+                'epub_nav' if row.get('navigation_kind') == 'epub3_nav' else 'epub_ncx'
+                for row in safe_navigation_documents
+            }
+            safe_primary_navigation = any(
+                row.get('source') in safe_candidate_sources
+                and row.get('navigation_type') == 'toc'
+                and row.get('candidate_role') == 'primary_navigation'
+                and row.get('eligible_for_toc') is True
+                for row in toc_candidates
+            )
+            structure_decision = decisions.get(('structure', 'canonical'), {})
+            if (
+                safe_navigation_documents
+                and safe_primary_navigation
+                and structure_decision.get('semantic_reading') is True
+                and structure_decision.get('disposition') == 'reviewed'
+            ):
+                warnings.append({
+                    'code': 'unsafe_navigation_resource_quarantined',
+                    'manifest_id': unsafe_manifest_id,
+                    'safe_navigation_manifest_ids': [
+                        str(row.get('manifest_id')) for row in safe_navigation_documents
+                    ],
+                })
+                continue
         page_id = finding.get('page_id') if isinstance(finding, dict) else None
         occurrence_id = finding.get('occurrence_id') if isinstance(finding, dict) else None
         object_id = finding.get('object_id') if isinstance(finding, dict) else None
@@ -568,9 +751,186 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
                   else (decisions.get(('object', str(object_id))) if object_id
                         else (decisions.get(('structure', 'canonical')) if candidate_id else None)))
         )
-        if not resolution_is_verified(decision, finding if isinstance(finding, dict) else {'kind': code}):
-            unresolved_extraction.append(finding)
+        if resolution_is_verified(decision, finding if isinstance(finding, dict) else {'kind': code}):
+            continue
+        if target == 'hint' and code in HINT_TOLERABLE_FINDINGS:
+            warnings.append({'code': 'hint_unresolved_extraction_finding', 'finding': finding})
+            continue
+        unresolved_extraction.append(finding)
     check('extraction_findings_resolved', not unresolved_extraction, observed=unresolved_extraction, expected=[], blocker='unresolved_extraction_finding')
+
+    if target in {'review', 'citation'} and manifest.get('source', {}).get('format') == 'epub':
+        navigation_surfaces = [
+            row for row in pages if row.get('route') == 'epub_navigation_metadata'
+        ]
+        projected_inventory_path = package / 'source' / 'source_inventory.json'
+        projected_inventory = read_json(projected_inventory_path) if projected_inventory_path.is_file() else {}
+        expected_navigation_count = len(
+            (projected_inventory.get('metadata') or {}).get('navigation_documents', [])
+        )
+        invalid_navigation_surfaces = [
+            str(row.get('page_id')) for row in navigation_surfaces
+            if (
+                row.get('surface_role') != 'auxiliary_navigation'
+                or row.get('canonical_inclusion') != 'excluded'
+                or not row.get('navigation_sha256')
+                or not row.get('navigation_semantic_status')
+                or (
+                    row.get('navigation_semantic_status') == 'nonsemantic_navigation_document_fallback_required'
+                    and row.get('fallback_navigation') != 'epub2_ncx'
+                )
+            )
+        ]
+        check(
+            'epub_navigation_logical_surface_accounting',
+            len(navigation_surfaces) == expected_navigation_count and not invalid_navigation_surfaces,
+            observed={
+                'count': len(navigation_surfaces),
+                'invalid_surface_ids': invalid_navigation_surfaces,
+            },
+            expected={'count': expected_navigation_count, 'invalid_surface_ids': []},
+            blocker='epub_navigation_logical_surface_gap',
+        )
+        expected_callout_occurrences = {
+            str(row.get('occurrence_id')) for row in assets
+            if row.get('callout_role') == 'code_callout'
+        }
+        observed_callout_occurrences = {
+            str(value)
+            for row in objects if row.get('object_kind') == 'callout'
+            for value in row.get('asset_occurrence_ids', []) if value
+        }
+        missing_callout_occurrences = sorted(expected_callout_occurrences - observed_callout_occurrences)
+        check(
+            'epub_callout_object_accounting', not missing_callout_occurrences,
+            observed=missing_callout_occurrences[:100], expected=[],
+            blocker='epub_callout_object_gap',
+        )
+        expected_formula_ids = {
+            str((row.get('metadata') or {}).get('mathml_sha256'))
+            for row in evidence
+            if (row.get('metadata') or {}).get('mathml_sha256')
+        }
+        observed_formula_ids = {
+            str(row.get('source_id'))
+            for row in objects
+            if row.get('object_kind') == 'equation' and row.get('source_id')
+        }
+        missing_formula_ids = sorted(expected_formula_ids - observed_formula_ids)
+        check(
+            'epub_mathml_object_accounting', not missing_formula_ids,
+            observed=missing_formula_ids[:100], expected=[],
+            blocker='epub_mathml_object_gap',
+        )
+        expected_code_ids = {
+            str((row.get('metadata') or {}).get('pre_text_sha256'))
+            for row in evidence
+            if (row.get('metadata') or {}).get('pre_text_sha256')
+        }
+        observed_code_ids = {
+            str(row.get('source_id'))
+            for row in objects
+            if row.get('object_kind') == 'code' and row.get('source_id')
+        }
+        missing_code_ids = sorted(expected_code_ids - observed_code_ids)
+        check(
+            'epub_preformatted_code_object_accounting', not missing_code_ids,
+            observed=missing_code_ids[:100], expected=[],
+            blocker='epub_preformatted_code_object_gap',
+        )
+        figures_missing_caption_links = []
+        for obj in objects:
+            if obj.get('object_kind') != 'figure':
+                continue
+            has_source_caption = any(
+                row.get('kind') == 'caption_text' and str(row.get('value') or '').strip()
+                for row in obj.get('representations', []) if isinstance(row, dict)
+            )
+            if has_source_caption and not obj.get('caption_object_id'):
+                figures_missing_caption_links.append(str(obj.get('object_id')))
+        check(
+            'epub_figure_caption_linkage', not figures_missing_caption_links,
+            observed=figures_missing_caption_links[:100], expected=[],
+            blocker='epub_figure_caption_link_gap',
+        )
+        structure = decisions.get(('structure', 'canonical')) or {}
+        review_boundaries = structure.get('boundaries', [])
+        review_toc_items = structure.get('toc_items', [])
+        paragraph_by_id = {str(row.get('paragraph_id')): row for row in paragraphs}
+
+        def review_heading_key(value: Any) -> str:
+            return re.sub(r'[^\w]+', '', str(value or '')).casefold()
+
+        source_heading_ids = set()
+        noncanonical_container_heading_ids = set()
+        noncanonical_container_types = {
+            'tip', 'note', 'warning', 'caution', 'important', 'sidebar',
+            'example', 'figure', 'table', 'equation', 'footnote', 'footnotes',
+        }
+        for paragraph in paragraphs:
+            paragraph_id = str(paragraph.get('paragraph_id'))
+            has_source_heading = False
+            is_noncanonical_heading = False
+            for span in paragraph.get('source_spans', []):
+                metadata = evidence_by_id.get(str(span.get('evidence_id')), {}).get('metadata', {})
+                tags = [metadata.get('tag'), *metadata.get('ancestor_tags', [])]
+                if any(tag in {'h1', 'h2', 'h3'} for tag in tags):
+                    has_source_heading = True
+                    container_types = {
+                        str(value).casefold()
+                        for value in [*metadata.get('data_types', []), *metadata.get('epub_types', [])]
+                        if value
+                    }
+                    classes = {
+                        str(value).casefold() for value in metadata.get('class', []) if value
+                    }
+                    is_noncanonical_heading = bool(
+                        is_noncanonical_heading
+                        or container_types & noncanonical_container_types
+                        or classes & {'featuretitle'}
+                    )
+            if has_source_heading:
+                if is_noncanonical_heading:
+                    noncanonical_container_heading_ids.add(paragraph_id)
+                else:
+                    source_heading_ids.add(paragraph_id)
+        toc_titles_by_boundary: dict[str, set[str]] = {}
+        for item in review_toc_items if isinstance(review_toc_items, list) else []:
+            if isinstance(item, dict):
+                toc_titles_by_boundary.setdefault(str(item.get('boundary_id')), set()).add(
+                    review_heading_key(item.get('title'))
+                )
+        materialized_heading_ids = set()
+        for boundary in review_boundaries if isinstance(review_boundaries, list) else []:
+            if not isinstance(boundary, dict):
+                continue
+            paragraph_ids = [str(value) for value in boundary.get('paragraph_ids', [])]
+            if not paragraph_ids or paragraph_ids[0] not in source_heading_ids:
+                continue
+            paragraph = paragraph_by_id.get(paragraph_ids[0], {})
+            if review_heading_key(paragraph.get('text')) in toc_titles_by_boundary.get(str(boundary.get('boundary_id')), set()):
+                materialized_heading_ids.add(paragraph_ids[0])
+        omitted_heading_ids = sorted(source_heading_ids - materialized_heading_ids)
+        check(
+            'epub_dom_heading_materialization', not omitted_heading_ids,
+            observed=omitted_heading_ids[:100], expected=[],
+            blocker='epub_dom_heading_omission',
+        )
+        assigned_heading_counts = Counter(
+            str(paragraph_id)
+            for boundary in review_boundaries if isinstance(boundary, dict)
+            for paragraph_id in boundary.get('paragraph_ids', [])
+            if str(paragraph_id) in noncanonical_container_heading_ids
+        )
+        invalid_container_headings = sorted(
+            paragraph_id for paragraph_id in noncanonical_container_heading_ids
+            if assigned_heading_counts.get(paragraph_id) != 1
+        )
+        check(
+            'epub_noncanonical_container_heading_accounting', not invalid_container_headings,
+            observed=invalid_container_headings[:100], expected=[],
+            blocker='epub_container_heading_accounting_gap',
+        )
 
     if target in {'hint', 'review'}:
         # Hint/review outputs may be semantically incomplete, but they must
@@ -675,7 +1035,12 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
         ranges_by_block: dict[str, list[tuple[int, int]]] = {str(block_id): [] for block_id in raw_by_id}
         orphan_spans = []
         invalid_span_anchors = []
-        for paragraph in paragraphs:
+        span_rows = (
+            canonical_projection
+            if canonical_projection and all(isinstance(row.get('source_spans'), list) for row in canonical_projection)
+            else paragraphs
+        )
+        for paragraph in span_rows:
             for span in paragraph.get('source_spans', []):
                 if not isinstance(span, dict):
                     invalid_span_anchors.append(str(paragraph.get('paragraph_id')))
@@ -754,9 +1119,9 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
             if decision.get('disposition') == 'used':
                 if decision.get('representation_status') != 'verified':
                     object_invalid.append(oid)
-                if obj.get('object_kind') in {'table', 'equation'} and not (decision.get('visual_verified') or decision.get('source_verified')):
+                if obj.get('object_kind') in {'table', 'equation', 'code'} and not (decision.get('visual_verified') or decision.get('source_verified')):
                     object_invalid.append(oid)
-                if obj.get('object_kind') in {'caption', 'figure'} and not decision.get('relations_reviewed'):
+                if obj.get('object_kind') in {'caption', 'figure', 'callout'} and not decision.get('relations_reviewed'):
                     object_invalid.append(oid)
                 if obj.get('object_kind') == 'figure':
                     for occurrence_id in obj.get('asset_occurrence_ids', []):
@@ -781,6 +1146,10 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
             str(row.get('surface_id') or row.get('page_id'))
             for row in sorted(pages, key=lambda row: int(row.get('ordinal', 0)))
         ]
+        excluded_surfaces = {
+            str(row.get('surface_id') or row.get('page_id'))
+            for row in pages if row.get('canonical_inclusion') == 'excluded'
+        }
         expected_surfaces = set(ordered_surfaces)
         covered_surfaces = set(str(x) for x in (structure or {}).get('covered_surface_ids', []))
         structure_base_ok = bool(
@@ -824,7 +1193,8 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
                 str(row.get('page_id')) for row in paragraphs if row.get('page_id')
             }
             textless_surfaces = [
-                surface_id for surface_id in ordered_surfaces if surface_id not in surfaces_with_paragraphs
+                surface_id for surface_id in ordered_surfaces
+                if surface_id not in surfaces_with_paragraphs and surface_id not in excluded_surfaces
             ]
             flattened_paragraphs: list[str] = []
             assigned_textless_surfaces: list[str] = []
@@ -868,7 +1238,7 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
                 and len(flattened_paragraphs) == len(set(flattened_paragraphs))
                 and set(assigned_textless_surfaces) == set(textless_surfaces)
                 and len(assigned_textless_surfaces) == len(set(assigned_textless_surfaces))
-                and boundary_surface_union == set(ordered_surfaces)
+                and boundary_surface_union == (set(ordered_surfaces) - excluded_surfaces)
             )
             check(
                 'chapter_boundary_partition', boundaries_well_formed,
@@ -908,6 +1278,59 @@ def evaluate_gates(package: Path, *, target: str = 'citation') -> dict[str, Any]
                 observed=toc_items, expected='non-empty unique TOC items mapped to reviewed boundaries',
                 blocker='canonical_toc_invalid',
             )
+            if manifest.get('source', {}).get('format') == 'epub':
+                def heading_key(value: Any) -> str:
+                    return re.sub(r'[^\w]+', '', str(value or '')).casefold()
+
+                source_heading_ids = set()
+                for paragraph in paragraphs:
+                    is_heading = False
+                    noncanonical_container_heading = False
+                    for span in paragraph.get('source_spans', []):
+                        metadata = evidence_by_id.get(str(span.get('evidence_id')), {}).get('metadata', {})
+                        tags = [metadata.get('tag'), *metadata.get('ancestor_tags', [])]
+                        if any(tag in {'h1', 'h2', 'h3'} for tag in tags):
+                            is_heading = True
+                            container_types = {
+                                str(value).casefold()
+                                for value in [*metadata.get('data_types', []), *metadata.get('epub_types', [])]
+                                if value
+                            }
+                            classes = {
+                                str(value).casefold() for value in metadata.get('class', []) if value
+                            }
+                            noncanonical_container_heading = bool(
+                                noncanonical_container_heading
+                                or container_types & {
+                                    'tip', 'note', 'warning', 'caution', 'important', 'sidebar',
+                                    'example', 'figure', 'table', 'equation', 'footnote', 'footnotes',
+                                }
+                                or classes & {'featuretitle'}
+                            )
+                    if is_heading and not noncanonical_container_heading:
+                        source_heading_ids.add(str(paragraph.get('paragraph_id')))
+                toc_titles_by_boundary: dict[str, set[str]] = {}
+                for item in toc_items if isinstance(toc_items, list) else []:
+                    if isinstance(item, dict):
+                        toc_titles_by_boundary.setdefault(str(item.get('boundary_id')), set()).add(
+                            heading_key(item.get('title'))
+                        )
+                materialized_heading_ids = set()
+                for boundary in boundaries if isinstance(boundaries, list) else []:
+                    if not isinstance(boundary, dict):
+                        continue
+                    paragraph_ids = [str(value) for value in boundary.get('paragraph_ids', [])]
+                    if not paragraph_ids or paragraph_ids[0] not in source_heading_ids:
+                        continue
+                    paragraph = paragraph_by_id.get(paragraph_ids[0], {})
+                    if heading_key(paragraph.get('text')) in toc_titles_by_boundary.get(str(boundary.get('boundary_id')), set()):
+                        materialized_heading_ids.add(paragraph_ids[0])
+                omitted_heading_ids = sorted(source_heading_ids - materialized_heading_ids)
+                check(
+                    'epub_dom_heading_materialization', not omitted_heading_ids,
+                    observed=omitted_heading_ids[:100], expected=[],
+                    blocker='epub_dom_heading_omission',
+                )
 
         source_boundary = decisions.get(('source_boundary', manifest.get('source', {}).get('sha256', '')))
         boundary_ok = bool(source_boundary and source_boundary.get('text') and source_boundary.get('semantic_reading'))
