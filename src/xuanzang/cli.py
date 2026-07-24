@@ -188,6 +188,14 @@ def cmd_publish(args):
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
+def cmd_verify_local_strict(args):
+    from .acceptance import verify_local_strict
+    result = verify_local_strict(Path(args.package), Path(args.export))
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if result.get('status') != 'PASS_STRICT':
+        raise SystemExit(2)
+
+
 def cmd_status(args):
     from .restoration import package_status
     print(json.dumps(package_status(
@@ -369,6 +377,14 @@ def build_parser():
     s.add_argument('--expected-tenant-id')
     s.add_argument('--expected-workspace-id')
     s.set_defaults(func=cmd_publish)
+
+    s = sub.add_parser(
+        'verify-local-strict',
+        help='Independently verify a citation export against its active package and strict Markdown contract',
+    )
+    s.add_argument('package')
+    s.add_argument('--export', required=True)
+    s.set_defaults(func=cmd_verify_local_strict)
 
     s = sub.add_parser('status', help='Recompute and print package trust state')
     s.add_argument('package')

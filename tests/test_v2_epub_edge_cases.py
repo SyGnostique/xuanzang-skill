@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from xuanzang.publish import _should_render_list_item, _table_markdown
+
 
 REPO = Path(__file__).resolve().parents[1]
 ENTITY_MARKER = 'XUANZANG_ENTITY_EXPANSION_MUST_NOT_APPEAR'
@@ -36,6 +38,12 @@ def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+
+def test_four_digit_bibliography_year_is_not_rendered_as_ordered_list_item() -> None:
+    semantics = {'kind': 'ordered', 'depth': 1, 'marker': '1.'}
+    assert not _should_render_list_item('1999. Editors Net Web site.', semantics)
+    assert _should_render_list_item('19. A genuine numbered item.', semantics)
 
 
 def container_xml(opf_path: str = 'OPS/package.opf') -> str:
@@ -119,6 +127,360 @@ def test_epub3_navigation_candidates_are_not_overwritten_by_legacy_seed(tmp_path
     assert [row['text'] for row in nav] == ['Authoritative NAV label']
     assert nav[0]['page_id'] == 'spine_0001'
     assert any(row.get('text') == 'Body-derived heading' for row in candidates)
+    navigation_surface = next(
+        row for row in read_jsonl(tmp_path / 'package' / 'ledger' / 'surfaces.jsonl')
+        if row.get('route') == 'epub_navigation_metadata'
+    )
+    assert navigation_surface['canonical_inclusion'] == 'excluded'
+    assert navigation_surface['navigation_semantic_status'] == 'parsed_semantic_navigation'
+
+
+def test_epub3_navigation_in_spine_still_has_excluded_logical_surface(tmp_path: Path) -> None:
+    epub = tmp_path / 'nav-in-spine.epub'
+    manifest = (
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(
+            manifest=manifest,
+            spine='<itemref idref="nav"/><itemref idref="chapter"/>',
+        ),
+        'OPS/nav.xhtml': (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+            '<nav epub:type="toc"><ol><li>'
+            '<a href="chapter.xhtml#opening">Chapter</a>'
+            '</li></ol></nav></body></html>'
+        ),
+        'OPS/chapter.xhtml': xhtml('<h1 id="opening">Chapter</h1><p>Evidence text.</p>'),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    surfaces = read_jsonl(package / 'ledger' / 'surfaces.jsonl')
+    navigation_surfaces = [row for row in surfaces if row.get('route') == 'epub_navigation_metadata']
+    assert len(navigation_surfaces) == 1
+    assert any(row.get('href') == 'OPS/nav.xhtml' and row.get('page_id') == 'spine_0001' for row in surfaces)
+    logical = navigation_surfaces[0]
+    assert logical['page_id'] != 'spine_0001'
+    assert logical['canonical_inclusion'] == 'excluded'
+    assert logical['surface_role'] == 'auxiliary_navigation'
+    assert logical['surface_kind'] == 'epub_navigation_resource'
+
+
+def test_css_hidden_spine_navigation_is_audited_but_not_canonical_text(tmp_path: Path) -> None:
+    epub = tmp_path / 'hidden-nav-in-spine.epub'
+    manifest = (
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        '<item id="css" href="style.css" media-type="text/css"/>'
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(
+            manifest=manifest,
+            spine='<itemref idref="nav"/><itemref idref="chapter"/>',
+        ),
+        'OPS/style.css': 'div.toc1 { visibility: hidden; display: none; }',
+        'OPS/nav.xhtml': (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:epub="http://www.idpf.org/2007/ops"><head>'
+            '<link rel="stylesheet" href="style.css"/></head><body>'
+            '<div class="toc1"><nav epub:type="toc"><ol><li>'
+            '<a href="chapter.xhtml#opening">Hidden navigation label</a>'
+            '</li></ol></nav></div></body></html>'
+        ),
+        'OPS/chapter.xhtml': xhtml('<h1 id="opening">Visible chapter</h1><p>Visible evidence.</p>'),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    assert 'Hidden navigation label' not in {row['text'] for row in evidence}
+    assert {'Visible chapter', 'Visible evidence.'} <= {row['text'] for row in evidence}
+    inventory = read_json(package / 'source' / 'source_inventory.json')
+    visibility = inventory['metadata']['visibility_audit']
+    assert visibility['hidden_text_nodes'] == 1
+    assert visibility['surfaces'][0]['hidden_text_dom_paths']
+
+
+def test_br_boundaries_are_retained_in_dom_container_text(tmp_path: Path) -> None:
+    epub = tmp_path / 'br-boundary.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml('<p>First line<br/>second line<br/>third line</p>'),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    assert [row['text'] for row in evidence] == ['First line', 'second line', 'third line']
+    assert {
+        (row.get('metadata') or {}).get('dom_container_text') for row in evidence
+    } == {'First line second line third line'}
+
+
+def test_css_display_block_boundaries_are_retained_in_dom_container_text(tmp_path: Path) -> None:
+    epub = tmp_path / 'css-block-boundary.epub'
+    manifest = (
+        '<item id="css" href="style.css" media-type="text/css"/>'
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/style.css': '.title-line, .credit { display: block; }',
+        'OPS/chapter.xhtml': (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+            '<link rel="stylesheet" href="style.css"/></head><body>'
+            '<h1><span>1</span><span class="title-line">Chapter title</span></h1>'
+            '<figcaption>Caption text<span class="credit">Source: Studio</span></figcaption>'
+            '</body></html>'
+        ),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    containers = {
+        row['text']: (row.get('metadata') or {}).get('dom_container_text')
+        for row in evidence
+    }
+    assert containers['1'] == '1 Chapter title'
+    assert containers['Chapter title'] == '1 Chapter title'
+    assert containers['Caption text'] == 'Caption text Source: Studio'
+    assert containers['Source: Studio'] == 'Caption text Source: Studio'
+
+
+def test_table_markdown_uses_exact_dom_cell_text_for_inline_fragments() -> None:
+    expected_cell = 'Mixed Reality: (e.g. Microsoft® HoloLens® ) MR description.'
+    obj = {
+        'representations': [{
+            'kind': 'table_cells',
+            'value': [
+                {'row': 0, 'column': 0, 'tag': 'td', 'text': 'MR:', 'evidence_id': 'label'},
+                {'row': 0, 'column': 1, 'tag': 'td', 'text': 'Mixed Reality: Microsoft', 'evidence_id': 'a'},
+                {'row': 0, 'column': 1, 'tag': 'td', 'text': '®', 'evidence_id': 'b'},
+                {'row': 0, 'column': 1, 'tag': 'td', 'text': 'HoloLens', 'evidence_id': 'c'},
+                {'row': 0, 'column': 1, 'tag': 'td', 'text': '®', 'evidence_id': 'd'},
+            ],
+        }],
+    }
+    evidence = {
+        'label': {'metadata': {'dom_container_text': 'MR:'}},
+        **{
+            evidence_id: {'metadata': {'dom_container_text': expected_cell}}
+            for evidence_id in ('a', 'b', 'c', 'd')
+        },
+    }
+    markdown = _table_markdown(obj, evidence)
+    assert f'| MR: | {expected_cell} |' in markdown
+    assert 'Microsoft ®' not in markdown
+    assert 'HoloLens )' not in markdown
+
+
+def test_table_markdown_preserves_distinct_block_containers_in_one_cell() -> None:
+    obj = {
+        'representations': [{
+            'kind': 'table_cells',
+            'value': [
+                {'row': 0, 'column': 0, 'tag': 'td', 'text': 'Exterior Day', 'evidence_id': 'a'},
+                {'row': 0, 'column': 0, 'tag': 'td', 'text': 'Monco and Colonel', 'evidence_id': 'b'},
+                {'row': 0, 'column': 0, 'tag': 'td', 'text': '’', 'evidence_id': 'c'},
+                {'row': 0, 'column': 0, 'tag': 'td', 'text': 's gang.', 'evidence_id': 'd'},
+            ],
+        }],
+    }
+    event = 'Monco and Colonel Mortimer kill the gang.'
+    evidence = {
+        'a': {'metadata': {'dom_container_text': 'Exterior Day'}},
+        'b': {'metadata': {'dom_container_text': event}},
+        'c': {'metadata': {'dom_container_text': event}},
+        'd': {'metadata': {'dom_container_text': event}},
+    }
+    markdown = _table_markdown(obj, evidence)
+    assert '| Exterior Day Monco and Colonel Mortimer kill the gang. |' in markdown
+    assert markdown.count(event) == 1
+
+
+def test_utf8_meta_xhtml_and_literal_markdown_heading_text_survive_publish(tmp_path: Path) -> None:
+    epub = tmp_path / 'utf8-meta-and-literal-hash.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    xhtml_bytes = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>'
+        '<title>UTF-8 fixture</title></head><body>'
+        '<p>Holmes’s work © 2024.</p>'
+        '<p># of Shots — explanatory prose.</p>'
+        '<p>#### = four-digit padding.</p>'
+        '</body></html>'
+    ).encode('utf-8')
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml_bytes,
+    })
+
+    package = tmp_path / 'package'
+    export = tmp_path / 'export'
+    restore_epub(epub, package)
+    run_cli('publish', str(package), '--target', 'hint', '--out', str(export))
+
+    evidence_text = '\n'.join(row['text'] for row in read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl'))
+    assert 'Holmes’s work © 2024.' in evidence_text
+    assert 'Holmesâ€™s' not in evidence_text and 'Â©' not in evidence_text
+    markdown = (export / 'document.md').read_text(encoding='utf-8')
+    assert '\\# of Shots — explanatory prose.' in markdown
+    assert '\\#### = four-digit padding.' in markdown
+    assert '\n# of Shots' not in markdown and '\n#### = four-digit padding.' not in markdown
+
+
+def test_epub_mathml_comments_footer_and_h6_figure_caption_are_semantically_preserved(tmp_path: Path) -> None:
+    epub = tmp_path / 'semantic-objects.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml" properties="mathml"/>'
+    chapter = xhtml(
+        '<h1>Chapter</h1>'
+        '<!-- <p>hidden template instruction</p> -->'
+        '<p>Before formula.</p>'
+        '<math xmlns="http://www.w3.org/1998/Math/MathML" alttext="x squared equals four" display="block">'
+        '<msup><mi>x</mi><mn>2</mn></msup><mo>=</mo><mn>4</mn></math>'
+        '<pre>value = 4 <a id="callout-source" href="#callout-explanation">'
+        '<img src="1.png" width="12" height="12"/></a></pre>'
+        '<p id="callout-explanation">Callout explanation.</p>'
+        '<figure><div class="figure" id="figure-one"><img src="pixel.png"/>'
+        '<h6><span class="label">Figure 1. </span>Caption text</h6></div></figure>'
+        '<p style="text-align:right"><a href="https://example.test/translator" '
+        'style="color:#ccc;font-size:0.625rem">Translated by Fixture</a></p>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': chapter,
+        'OPS/pixel.png': b'\x89PNG\r\n\x1a\n',
+        'OPS/1.png': b'\x89PNG\r\n\x1a\n',
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    canonical = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    objects = read_jsonl(package / 'ledger' / 'objects.jsonl')
+    assets = read_jsonl(package / 'ledger' / 'assets.jsonl')
+
+    assert not any('hidden template instruction' in row['text'] for row in evidence)
+    footer = next(row for row in evidence if row['text'] == 'Translated by Fixture')
+    assert footer['metadata']['source_role'] == 'recurring_footer'
+    assert not any(row['text'] == 'Translated by Fixture' for row in canonical)
+    equations = [row for row in objects if row.get('object_kind') == 'equation']
+    assert len(equations) == 1
+    assert equations[0]['source_id']
+    assert any(row.get('kind') == 'mathml' for row in equations[0]['representations'])
+    assert sum(row.get('block_kind') == 'equation_candidate' for row in evidence) == 1
+    assert sum(row.get('block_kind') == 'callout_candidate' for row in evidence) == 1
+    assert sum(row.get('block_kind') == 'code_candidate' for row in evidence) == 1
+    callout = next(row for row in objects if row.get('object_kind') == 'callout')
+    assert callout['source_block_ids'] and callout['relation_status'] == 'linked'
+    assert any(
+        row.get('kind') == 'callout_link' and row.get('value') == '#callout-explanation'
+        for row in callout['representations']
+    )
+    code = next(row for row in objects if row.get('object_kind') == 'code')
+    assert any(
+        row.get('kind') == 'code_text' and 'value = 4' in row.get('value', '')
+        for row in code['representations']
+    )
+    assert callout['asset_occurrence_ids'][0] in code['asset_occurrence_ids']
+    assert next(row for row in assets if row.get('callout_role') != 'code_callout')['caption_text'] == 'Figure 1. Caption text'
+    figure = next(row for row in objects if row.get('object_kind') == 'figure')
+    assert figure['caption_object_id']
+    assert figure['relation_status'] == 'linked'
+
+
+def test_epub_preformatted_code_preserves_source_indentation_and_token_spacing(tmp_path: Path) -> None:
+    epub = tmp_path / 'preformatted-code.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    source_code = (
+        '<pre data-code-language="python" data-type="programlisting">'
+        '<code class="k">class</code> <code class="nc">VAE</code><code class="p">:</code>\n'
+        '    <code class="k">def</code> <code class="nf">train</code><code class="p">(</code>'
+        '<code class="bp">self</code><code class="p">):</code>\n'
+        '        <code class="k">return</code> <code class="mi">1</code>\n'
+        '</pre>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml('<h1>Code</h1>' + source_code),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    code = next(
+        row for row in read_jsonl(package / 'ledger' / 'objects.jsonl')
+        if row.get('object_kind') == 'code'
+    )
+    representations = {row['kind']: row for row in code['representations']}
+    assert representations['code_text']['value'] == (
+        'class VAE:\n    def train(self):\n        return 1\n'
+    )
+    assert representations['source_xml']['value'] == source_code
+
+
+def test_published_external_link_repairs_unbalanced_trailing_parenthesis_reversibly(tmp_path: Path) -> None:
+    epub = tmp_path / 'malformed-link.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml(
+            '<h1>Link</h1><p>Source: <a href="https://example.test/playground)">'
+            'https://example.test/playground)</a></p>'
+        ),
+    })
+
+    package = tmp_path / 'package'
+    export = tmp_path / 'export'
+    restore_epub(epub, package)
+    run_cli('publish', str(package), '--target', 'hint', '--out', str(export))
+    chunk = next(row for row in read_jsonl(export / 'chunks.jsonl') if row.get('links'))
+    assert chunk['links'][0]['href'] == 'https://example.test/playground'
+    assert chunk['links'][0]['source_href'] == 'https://example.test/playground)'
+    markdown = (export / 'document.md').read_text(encoding='utf-8')
+    assert 'https://example.test/playground)' in markdown
+    assert '\nLinks:' not in markdown
+
+
+def test_legacy_div_figure_and_image_caption_are_linked(tmp_path: Path) -> None:
+    epub = tmp_path / 'legacy-div-figure.epub'
+    manifest = '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml(
+            '<h1>Legacy figure</h1><div class="fig" id="fig1_2f">'
+            '<img src="figure.jpg" alt="Figure 1.2 Source alt"/>'
+            '<p class="image_caption" id="fig1_2">Figure 1.2 Linked caption</p></div>'
+        ),
+        'OPS/figure.jpg': b'fixture-image',
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    objects = read_jsonl(package / 'ledger' / 'objects.jsonl')
+    assets = read_jsonl(package / 'ledger' / 'assets.jsonl')
+    caption = next(row for row in objects if row.get('object_kind') == 'caption')
+    figure = next(row for row in objects if row.get('object_kind') == 'figure')
+    assert caption['relation_status'] == 'linked'
+    assert figure['caption_object_id'] == caption['object_id']
+    assert assets[0]['figure_id'] == 'fig1_2f'
+    assert assets[0]['caption_text'] == 'Figure 1.2 Linked caption'
 
 
 def test_nested_nav_and_ncx_hrefs_resolve_from_each_navigation_document(tmp_path: Path) -> None:
@@ -164,6 +526,126 @@ def test_nested_nav_and_ncx_hrefs_resolve_from_each_navigation_document(tmp_path
     assert ncx['page_id'] == 'spine_0002'
     assert '..' not in nav['href'] and nav['href'].endswith('text/chapter-1.xhtml')
     assert '..' not in ncx['href'] and ncx['href'].endswith('text/chapter-2.xhtml')
+
+
+def test_standard_external_ncx_doctype_is_removed_without_resolving_it(tmp_path: Path) -> None:
+    epub = tmp_path / 'standard-ncx-doctype.epub'
+    manifest = (
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/toc.ncx': (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" '
+            '"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap>'
+            '<navPoint id="chapter" playOrder="1"><navLabel><text>Safe chapter</text></navLabel>'
+            '<content src="chapter.xhtml"/></navPoint></navMap></ncx>'
+        ),
+        'OPS/chapter.xhtml': xhtml('<h1>Safe chapter</h1>'),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    assert any(row.get('text') == 'Safe chapter' for row in toc_candidates(package))
+    blockers = read_json(package / 'audit' / 'extraction_audit.json')['hard_blockers']
+    assert not any(row.get('kind') == 'epub_navigation_unsafe_xml' for row in blockers)
+    manifest_data = read_json(package / 'package_manifest.json')
+    inventory = read_json(package / 'runs' / manifest_data['active_run_id'] / 'source_inventory.json')
+    assert inventory['metadata']['navigation_documents'][0]['external_doctype_removed_before_parse'] is True
+
+    evidence = read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')
+    chapter = next(row for row in evidence if row.get('text') == 'Safe chapter')
+    assert chapter['engine_version'] == 'xuanzang-epub-dom-v2.1'
+    raw_xhtml = chapter['metadata']['raw_xhtml']
+    assert raw_xhtml.startswith(f"runs/{manifest_data['active_run_id']}/assets/epub_tree/")
+    assert (package / raw_xhtml).is_file()
+
+
+def test_bare_html5_nav_doctype_is_removed_without_enabling_entities(tmp_path: Path) -> None:
+    epub = tmp_path / 'bare-nav-doctype.epub'
+    manifest = (
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/nav.xhtml': (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE html>'
+            '<html xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li>'
+            '<a href="chapter.xhtml">Safe HTML5 chapter</a>'
+            '</li></ol></nav></body></html>'
+        ),
+        'OPS/chapter.xhtml': xhtml('<h1>Safe HTML5 chapter</h1>'),
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    assert any(row.get('text') == 'Safe HTML5 chapter' for row in toc_candidates(package))
+    blockers = read_json(package / 'audit' / 'extraction_audit.json')['hard_blockers']
+    assert not any(row.get('kind') == 'epub_navigation_unsafe_xml' for row in blockers)
+
+
+def test_visual_only_epub_spine_binds_single_local_image_as_rendition(tmp_path: Path) -> None:
+    epub = tmp_path / 'visual-only-rendition.epub'
+    image_bytes = (
+        b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+        b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8'
+        b'\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82'
+    )
+    manifest = (
+        '<item id="page" href="page.xhtml" media-type="application/xhtml+xml"/>'
+        '<item id="image" href="page.png" media-type="image/png"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="page"/>'),
+        'OPS/page.xhtml': xhtml('<img src="page.png" alt="page image"/>'),
+        'OPS/page.png': image_bytes,
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    surface = read_jsonl(package / 'ledger' / 'surfaces.jsonl')[0]
+    assert surface['page_image_path']
+    assert surface['page_image_sha256']
+    assert (package / surface['page_image_path']).read_bytes() == image_bytes
+
+
+def test_identical_sibling_nodes_receive_distinct_dom_paths_and_occurrence_ids(tmp_path: Path) -> None:
+    epub = tmp_path / 'identical-siblings.epub'
+    image_bytes = (
+        b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+        b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8'
+        b'\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82'
+    )
+    manifest = (
+        '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+        '<item id="image" href="figure.png" media-type="image/png"/>'
+    )
+    write_epub(epub, {
+        'META-INF/container.xml': container_xml(),
+        'OPS/package.opf': package_opf(manifest=manifest, spine='<itemref idref="chapter"/>'),
+        'OPS/chapter.xhtml': xhtml(
+            '<p>Repeated text.</p><p>Repeated text.</p>'
+            '<p><img src="figure.png"/></p><p><img src="figure.png"/></p>'
+        ),
+        'OPS/figure.png': image_bytes,
+    })
+
+    package = tmp_path / 'package'
+    restore_epub(epub, package)
+    evidence = [row for row in read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl') if row['text'] == 'Repeated text.']
+    assets = read_jsonl(package / 'ledger' / 'assets.jsonl')
+    assert len(evidence) == 2 and len({tuple(row['metadata']['dom_path']) for row in evidence}) == 2
+    assert len(assets) == 2 and len({tuple(row['dom_path']) for row in assets}) == 2
+    assert len({row['occurrence_id'] for row in assets}) == 2
 
 
 def test_textless_legal_spine_items_still_have_surfaces_and_explicit_state(tmp_path: Path) -> None:

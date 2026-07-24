@@ -1,8 +1,10 @@
-# 玄奘 xuanzang-skill 2.1
+# 玄奘 xuanzang-skill 2.2
 
-`xuanzang-skill` restores source documents into versioned evidence packages for review, citation-grade knowledge-base export, and downstream retrieval. Its primary contract is an auditable chain from source bytes to surfaces, evidence blocks, canonical paragraphs, semantic and visual structure decisions, gates, and revision-bound exports.
+`xuanzang-skill` rebuilds source documents into source-faithful, noise-free, correctly chaptered Markdown with complete figures/tables, machine-readable JSONL, and reverse-locatable evidence. Its primary contract is an auditable chain from source bytes to surfaces, evidence blocks, canonical paragraphs, semantic and visual structure decisions, gates, revision-bound exports, and independent local acceptance.
 
-Version 2.1 adds the complete multi-pass semantic/visual TOC and boundary-review protocol to the 2.0 evidence compiler. Code-level gates and automated canaries are implemented; the real authorized full-chain pilot, agricultural-domain review sample, release-commit CI, and maintainer signature remain acceptance work. It is not a public multi-tenant service; see [Known limitations](docs/known_limitations.md), [2.0 release notes](docs/release_notes_2.0.md), and [2.1 release notes](docs/release_notes_2.1.md).
+Version 2.2 makes local-strict reconstruction the default agent workflow, reserves Markdown H1 for the book title and H2/H3 for source structure, adds an independent `verify-local-strict` command, and turns prior structural/OCR/media/publication failures into an explicit regression registry. It is not a public multi-tenant service; see [Known limitations](docs/known_limitations.md), [2.0 release notes](docs/release_notes_2.0.md), [2.1 release notes](docs/release_notes_2.1.md), and [2.2 release notes](docs/release_notes_2.2.md).
+
+The recovered interaction scope, provenance limitation, retained requirements, and failure-family mapping are recorded in the [2.2 history audit](docs/xuanzang_2.2_history_audit.md).
 
 ## Trust model
 
@@ -32,7 +34,7 @@ xuanzang --help
 
 PDF support uses PyMuPDF. Image inputs use Pillow. OCR engines are optional and selected only when installed or explicitly configured. MOBI/AZW3 conversion requires a local `ebook-convert` executable.
 
-## Core workflow: restore → status → review → publish → revoke
+## Core workflow: restore → status → review → publish → verify-local-strict
 
 ### 1. Restore
 
@@ -52,9 +54,9 @@ Supported inputs are PDF, EPUB, DOCX, TXT, Markdown, HTML, common raster images 
 
 ### Semantic and visual structure review
 
-For dirty, scanned, multi-column, image-heavy, or structurally ambiguous books, extracted candidates are evidence inputs rather than an automatic final structure. Follow the ordered protocol in [`skills/xuanzang/assets/prompt_templates/README.md`](skills/xuanzang/assets/prompt_templates/README.md): whole-book architecture, visual TOC discovery and transcription, canonical TOC, hierarchy/materialization adjudication, candidate assessment, exact boundaries, media affiliation, exhaustive section audit, independent reverse audit, evidence-bounded revision, and the 98-point implementation gate.
+For dirty, scanned, multi-column, image-heavy, or structurally ambiguous books, extracted candidates are evidence inputs rather than an automatic final structure. Follow the ordered protocol in [`skills/xuanzang/assets/prompt_templates/README.md`](skills/xuanzang/assets/prompt_templates/README.md): whole-book architecture, visual TOC discovery and transcription, canonical TOC, hierarchy/materialization adjudication, candidate assessment, exact boundaries, media affiliation, exhaustive section audit, independent reverse audit, and evidence-bounded revision.
 
-Use a vision-capable model when printed layout, typography, multi-column order, page imagery, or media affiliation affects the decision. Every accepted structure must still be submitted through revision-bound v2 `structure` review decisions and pass the current citation gate. Prompt output, confidence, or a 98-point score has no independent trust authority.
+Use a vision-capable model when printed layout, typography, multi-column order, page imagery, or media affiliation affects the decision. Every accepted structure must still be submitted through revision-bound v2 `structure` review decisions and pass the current citation gate. Prompt output, confidence, or a numeric score has no independent trust authority.
 
 The protocol covers monographs, edited collections, lectures, interviews, catalogues, bilingual books, critical editions, notes/index-heavy books, Chinese scans, dirty EPUBs, and sources without a reliable printed TOC.
 
@@ -152,7 +154,16 @@ xuanzang publish packages/source \
 
 Hint output carries `hint_only` trust markers and cannot serve as citation evidence. Published chunks do not contain vectors. `embedding_manifest.json` records the chunk hash, invalidation key, trust state, and namespace requirements for a downstream embedding service. Access tags and privacy metadata are carried forward; enforcement remains the responsibility of the hosting runtime.
 
-### 5. Revoke
+### 5. Verify local strict
+
+```bash
+xuanzang verify-local-strict packages/source \
+  --export exports/source-citation
+```
+
+This recomputes the active citation gate and independently verifies source/run/revision identity, artifact hashes, publication invariants, the one-H1/H2-H3 Markdown contract, reverse-locatable chunks, asset hashes and exact-once references, and object counts. It writes `local_strict_acceptance.json` and exits nonzero on any failure. A book is complete only when this report is `PASS_STRICT`.
+
+### 6. Revoke
 
 Revoke an active package when authorization, retention, source rights, or data correctness changes:
 
@@ -243,7 +254,7 @@ If copied outside this repository, install this package or set `XUANZANG_REPO` t
 
 Run the release checks in [docs/release_checklist.md](docs/release_checklist.md). The old 98-point goal-loop files under `audit/` are archived v1 self-scores and have no v2 gate authority.
 
-The v2.1 prompt-protocol score in `audit/semantic_visual_prompt_protocol_score.md` evaluates reusable prompt completeness only. It cannot promote a package, replace ManualStrict review, or satisfy the release checklist without current execution evidence.
+The archived prompt-protocol score in `audit/semantic_visual_prompt_protocol_score.md` evaluates reusable prompt completeness only. It cannot promote a package, replace semantic review, or satisfy local-strict acceptance without current execution evidence.
 
 Current acceptance target:
 

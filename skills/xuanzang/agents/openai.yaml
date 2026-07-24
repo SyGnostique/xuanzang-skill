@@ -1,6 +1,6 @@
 interface:
-  display_name: "玄奘 2.0"
-  short_description: "把复杂文档恢复为可审计、可复核、可引用的版本化证据包"
-  default_prompt: "Use $xuanzang to restore this source into a revisioned evidence package, resolve review blockers, and publish only the trust level its anchors and semantic coverage prove."
+  display_name: "玄奘 Local Strict"
+  short_description: "把整本书重建为保真、无噪音、结构准确且可反向定位的 Markdown"
+  default_prompt: "Use $xuanzang to run the complete local-strict rebuild: preserve immutable evidence, reconstruct the whole-book structure, resolve all blockers, publish citation-grade Markdown/JSONL, and do not stop until verify-local-strict passes or an exact irreducible blocker is reported."
 policy:
   allow_implicit_invocation: true

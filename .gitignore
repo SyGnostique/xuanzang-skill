@@ -32,6 +32,12 @@ secrets.*
 packages/
 *.log
 
+# Private evaluator/run coordination evidence
+# These files can contain absolute source paths, copyrighted book titles,
+# provider responses, and package-specific audit details. Commit only the
+# sanitized reusable prompts, references, fixtures, and regressions.
+feedback/
+
 # Build metadata
 *.egg-info/
 build/

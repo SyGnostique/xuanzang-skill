@@ -38,14 +38,17 @@ def _load_decisions(path: Path) -> list[dict[str, Any]]:
 def _targets(package: Path) -> dict[str, set[str]]:
     pages = read_jsonl(package / 'ledger' / 'surfaces.jsonl') or read_jsonl(package / 'ledger' / 'pages.jsonl')
     paragraphs = read_jsonl(package / 'ledger' / 'paragraph_candidates_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'paragraph_candidates.jsonl')
-    canonical = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    canonical = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+    raw_canonical = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
     return {
         'page': {str(row.get('page_id') or row.get('surface_id')) for row in pages},
         'surface': {str(row.get('surface_id') or row.get('page_id')) for row in pages},
         'paragraph': {str(row.get('paragraph_id')) for row in paragraphs},
         'asset': {str(row.get('occurrence_id')) for row in read_jsonl(package / 'ledger' / 'assets.jsonl')},
         'object': {str(row.get('object_id')) for row in read_jsonl(package / 'ledger' / 'objects.jsonl')},
-        'canonical_block': {str(row.get('block_id')) for row in canonical},
+        'canonical_block': {
+            str(row.get('block_id')) for row in [*raw_canonical, *canonical]
+        },
     }
 
 
@@ -123,16 +126,92 @@ def _normalize(
             raise ValueError('paragraph decision requires boolean requires_primary_anchor')
         if not row.get('source_id') or not row.get('sourcepage_path'):
             raise ValueError('paragraph decision requires source_id and sourcepage_path')
+        if 'list_semantics' in row:
+            value = row.get('list_semantics')
+            if (
+                not isinstance(value, dict)
+                or value.get('kind') not in {'ordered', 'unordered'}
+                or not isinstance(value.get('depth'), int) or value['depth'] < 1
+                or not isinstance(value.get('marker'), str) or not value['marker']
+            ):
+                raise ValueError('paragraph list_semantics requires kind, positive depth, and marker')
+    if 'preserved_target_correction' in row:
+        preserved = row.get('preserved_target_correction')
+        if (
+            kind != 'canonical_block'
+            or row.get('action') != 'reorder_blocks'
+            or not isinstance(preserved, dict)
+            or set(preserved) != {'decision_id', 'corrected_text'}
+            or not isinstance(preserved.get('decision_id'), str)
+            or not preserved.get('decision_id')
+            or not isinstance(preserved.get('corrected_text'), str)
+            or not preserved.get('corrected_text')
+        ):
+            raise ValueError(
+                'preserved_target_correction is only valid for reorder_blocks and requires decision_id plus corrected_text'
+            )
+    if kind == 'object' and 'source_block_ids_override' in row:
+        override = row.get('source_block_ids_override')
+        if not isinstance(override, list) or any(not isinstance(value, str) for value in override):
+            raise ValueError('object source_block_ids_override must be a list of block_id strings')
+        active_canonical = (
+            read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl')
+            or read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+        )
+        canonical_ids = {
+            str(value)
+            for item in active_canonical
+            for value in [
+                item.get('block_id'),
+                *(span.get('block_id') for span in item.get('source_spans', []) if isinstance(span, dict)),
+            ]
+            if value
+        }
+        if any(value not in canonical_ids for value in override):
+            raise ValueError('object source_block_ids_override contains an unknown active canonical block')
+    if kind == 'object' and 'object_kind_override' in row:
+        if row.get('object_kind_override') not in {
+            'table', 'form', 'flowchart', 'chart', 'list', 'index', 'index_page',
+            'figure', 'caption', 'equation', 'code', 'link', 'callout',
+        }:
+            raise ValueError('unsupported object_kind_override')
+    if kind == 'object' and 'asset_occurrence_ids_override' in row:
+        occurrence_ids = {
+            str(item.get('occurrence_id'))
+            for item in read_jsonl(package / 'ledger' / 'assets.jsonl')
+            if item.get('occurrence_id')
+        }
+        override = row.get('asset_occurrence_ids_override')
+        if (
+            not isinstance(override, list)
+            or any(not isinstance(value, str) or value not in occurrence_ids for value in override)
+        ):
+            raise ValueError('object asset_occurrence_ids_override must contain known occurrence IDs')
+    if kind == 'object' and 'representations_override' in row:
+        if (
+            not isinstance(row.get('representations_override'), list)
+            or any(not isinstance(value, dict) or not value.get('kind') for value in row['representations_override'])
+        ):
+            raise ValueError('object representations_override must contain typed representation objects')
     if kind == 'structure':
         if target_id != 'canonical' or row.get('disposition') != 'reviewed' or not row.get('semantic_reading'):
             raise ValueError('structure decision must semantically review target_id=canonical')
+        if 'document_title' in row and not str(row.get('document_title') or '').strip():
+            raise ValueError('structure document_title must be non-empty when supplied')
         surfaces = read_jsonl(package / 'ledger' / 'surfaces.jsonl') or read_jsonl(package / 'ledger' / 'pages.jsonl')
         ordered_surfaces = [
             str(item.get('surface_id') or item.get('page_id'))
             for item in sorted(surfaces, key=lambda item: int(item.get('ordinal', 0)))
         ]
+        expected_excluded_surfaces = [
+            str(item.get('surface_id') or item.get('page_id'))
+            for item in sorted(surfaces, key=lambda item: int(item.get('ordinal', 0)))
+            if item.get('canonical_inclusion') == 'excluded'
+        ]
         if [str(value) for value in row.get('covered_surface_ids', [])] != ordered_surfaces:
             raise ValueError('structure covered_surface_ids must exactly match source surface order')
+        if [str(value) for value in row.get('excluded_surface_ids', [])] != expected_excluded_surfaces:
+            raise ValueError('structure excluded_surface_ids must exactly match noncanonical source surfaces')
         active_paragraphs = (
             read_jsonl(package / 'ledger' / 'paragraph_candidates_reviewed.jsonl')
             or read_jsonl(package / 'ledger' / 'paragraph_candidates.jsonl')
@@ -144,7 +223,8 @@ def _normalize(
             str(item.get('page_id')) for item in active_paragraphs if item.get('page_id')
         }
         textless_surfaces = [
-            surface_id for surface_id in ordered_surfaces if surface_id not in surfaces_with_paragraphs
+            surface_id for surface_id in ordered_surfaces
+            if surface_id not in surfaces_with_paragraphs and surface_id not in expected_excluded_surfaces
         ]
         candidates = read_json(package / 'toc' / 'toc_candidates.json').get('candidates', [])
         candidate_ids = {str(item.get('candidate_id')) for item in candidates if item.get('candidate_id')}
@@ -205,13 +285,14 @@ def _normalize(
         if (
             set(assigned_textless_surfaces) != set(textless_surfaces)
             or len(assigned_textless_surfaces) != len(set(assigned_textless_surfaces))
-            or boundary_surface_union != set(ordered_surfaces)
+            or boundary_surface_union != (set(ordered_surfaces) - set(expected_excluded_surfaces))
         ):
             raise ValueError('structure boundaries must assign every textless surface exactly once and cover every surface')
         toc_items = row.get('toc_items')
         if not isinstance(toc_items, list) or not toc_items:
             raise ValueError('structure requires a non-empty canonical TOC')
         toc_ids: set[str] = set()
+        toc_by_id: dict[str, dict[str, Any]] = {}
         mapped_boundary_ids: set[str] = set()
         mapped_candidate_ids: set[str] = set()
         for item in toc_items:
@@ -224,8 +305,18 @@ def _normalize(
             ):
                 raise ValueError('canonical TOC items require unique IDs, titles, reviewed boundaries, and valid candidates')
             toc_ids.add(toc_id)
+            toc_by_id[toc_id] = item
             mapped_boundary_ids.add(str(item.get('boundary_id')))
             mapped_candidate_ids.update(source_ids)
+        for toc_id, item in toc_by_id.items():
+            parent_id = item.get('parent_toc_id')
+            level = int(item.get('level', 1))
+            if parent_id:
+                parent = toc_by_id.get(str(parent_id))
+                if not parent or int(parent.get('level', 1)) >= level:
+                    raise ValueError('canonical TOC parent_toc_id must reference a shallower canonical node')
+            elif level != 1:
+                raise ValueError('canonical TOC non-root levels require parent_toc_id')
         used_candidate_ids = {
             candidate_id for candidate_id, item in disposition_by_id.items()
             if item.get('disposition') == 'used'
@@ -250,7 +341,11 @@ def _normalize(
 
 
 def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    base = read_jsonl(package / 'ledger' / 'canonical_reviewed.jsonl') or read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
+    # Rebuild each canonical projection from immutable raw blocks plus the
+    # complete active canonical decision head. Layering edits on a prior
+    # reviewed projection makes consumed source block IDs impossible to repair
+    # or supersede safely.
+    base = read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')
     raw_by_id = {row['block_id']: row for row in read_jsonl(package / 'ledger' / 'canonical_blocks.jsonl')}
     evidence = {row['evidence_id']: row for row in read_jsonl(package / 'ledger' / 'evidence_blocks.jsonl')}
     by_id = {row['block_id']: row for row in base}
@@ -270,9 +365,26 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
             out.append(row)
             continue
         action = decision.get('action')
-        if action not in {'correct_text', 'select_variant', 'join_blocks', 'split_block', 'reorder_blocks'}:
+        if action not in {
+            'correct_text', 'select_variant', 'join_blocks', 'join_blocks_across_surfaces',
+            'split_block', 'resegment_blocks_across_surfaces', 'reorder_blocks', 'exclude_block',
+        }:
             raise ValueError(f'unsupported canonical_block action: {action}')
-        if action == 'correct_text':
+        if action == 'exclude_block':
+            row = dict(block)
+            row.update({
+                'selection_status': 'reviewed_exclusion',
+                'canonical_disposition': 'excluded',
+                'exclusion_reason': decision.get('reason'),
+                'review_decision_id': decision['decision_id'],
+                'source_spans': block.get('source_spans') or [{
+                    'block_id': block_id, 'evidence_id': block.get('evidence_id'),
+                    'page_id': block.get('page_id'), 'bbox': block.get('bbox', []),
+                    'start_offset': 0, 'end_offset': len(raw_by_id.get(block_id, block).get('text', '')),
+                }],
+            })
+            out.append(row)
+        elif action == 'correct_text':
             corrected = str(decision.get('corrected_text', ''))
             if not corrected:
                 raise ValueError('correct_text requires corrected_text')
@@ -311,17 +423,28 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
                 }],
             })
             out.append(row)
-        elif action == 'join_blocks':
+        elif action in {'join_blocks', 'join_blocks_across_surfaces'}:
             join_ids = list(dict.fromkeys([block_id, *decision.get('join_block_ids', [])]))
             try:
                 indexes = sorted([list(by_id).index(value) for value in join_ids])
             except ValueError as exc:
                 raise ValueError('join_blocks references an unknown canonical block') from exc
-            if indexes != list(range(min(indexes), max(indexes) + 1)):
-                raise ValueError('join_blocks requires contiguous canonical blocks')
+            full_indexes = list(range(min(indexes), max(indexes) + 1))
+            if indexes != full_indexes:
+                skipped_ids = [list(by_id)[index] for index in full_indexes if index not in indexes]
+                safely_excluded = (
+                    action == 'join_blocks_across_surfaces'
+                    and all(
+                        latest.get(('canonical_block', value), {}).get('action') == 'exclude_block'
+                        or by_id[value].get('block_kind') == 'caption_candidate'
+                        for value in skipped_ids
+                    )
+                )
+                if not safely_excluded:
+                    raise ValueError('join_blocks requires contiguous canonical blocks')
             join_ids = [list(by_id)[index] for index in indexes]
             members = [by_id[value] for value in join_ids]
-            if len({row.get('page_id') for row in members}) != 1:
+            if action == 'join_blocks' and len({row.get('page_id') for row in members}) != 1:
                 raise ValueError('join_blocks cannot cross surfaces; use structure relations for cross-page continuity')
             text = str(decision.get('corrected_text') or ' '.join(row.get('text', '') for row in members))
             spans = []
@@ -336,6 +459,82 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
                 'source_spans': spans, 'selection_status': 'reviewed_join', 'review_decision_id': decision['decision_id'],
             })
             consumed.update(join_ids[1:])
+        elif action == 'resegment_blocks_across_surfaces':
+            source_block_ids = list(dict.fromkeys([
+                block_id, *decision.get('source_block_ids', []),
+            ]))
+            try:
+                source_indexes = [list(by_id).index(value) for value in source_block_ids]
+            except ValueError as exc:
+                raise ValueError('resegment_blocks_across_surfaces references an unknown canonical block') from exc
+            if source_indexes != sorted(source_indexes):
+                raise ValueError('resegment_blocks_across_surfaces source blocks must follow source order')
+            segments = decision.get('segments')
+            if not isinstance(segments, list) or not segments:
+                raise ValueError('resegment_blocks_across_surfaces requires non-empty segments')
+            normalized_segments = []
+            coverage: dict[str, list[tuple[int, int]]] = {value: [] for value in source_block_ids}
+            for segment in segments:
+                if not isinstance(segment, dict) or not str(segment.get('text') or '').strip():
+                    raise ValueError('resegmentation segments require non-empty text')
+                requested_spans = segment.get('source_spans')
+                if not isinstance(requested_spans, list) or not requested_spans:
+                    raise ValueError('resegmentation segments require source_spans')
+                normalized_spans = []
+                previous_source_index = -1
+                for requested in requested_spans:
+                    if not isinstance(requested, dict):
+                        raise ValueError('resegmentation source spans must be objects')
+                    raw_block_id = str(requested.get('block_id') or '')
+                    if raw_block_id not in coverage:
+                        raise ValueError('resegmentation span references a block outside source_block_ids')
+                    source_index = source_block_ids.index(raw_block_id)
+                    if source_index < previous_source_index:
+                        raise ValueError('resegmentation spans must follow source block order')
+                    previous_source_index = source_index
+                    raw_row = raw_by_id[raw_block_id]
+                    start = int(requested.get('start_offset', -1))
+                    end = int(requested.get('end_offset', -1))
+                    if start < 0 or end <= start or end > len(str(raw_row.get('text') or '')):
+                        raise ValueError('resegmentation span offsets must select non-empty raw text')
+                    coverage[raw_block_id].append((start, end))
+                    normalized_spans.append({
+                        'block_id': raw_block_id,
+                        'evidence_id': raw_row.get('evidence_id'),
+                        'page_id': raw_row.get('page_id'),
+                        'bbox': raw_row.get('bbox', []),
+                        'start_offset': start,
+                        'end_offset': end,
+                    })
+                normalized_segments.append((
+                    str(segment['text']), normalized_spans,
+                    str(segment.get('block_kind') or ''),
+                ))
+            for raw_block_id, intervals in coverage.items():
+                raw_length = len(str(raw_by_id[raw_block_id].get('text') or ''))
+                cursor = 0
+                for start, end in sorted(intervals):
+                    if start != cursor:
+                        raise ValueError('resegmentation spans must cover every selected raw block exactly once')
+                    cursor = end
+                if cursor != raw_length:
+                    raise ValueError('resegmentation spans must cover every selected raw block exactly once')
+            for index, (text, spans, block_kind_override) in enumerate(normalized_segments, start=1):
+                seed = raw_by_id[spans[0]['block_id']]
+                segment_source_ids = list(dict.fromkeys(span['block_id'] for span in spans))
+                identity = json.dumps(spans, ensure_ascii=False, sort_keys=True)
+                out.append({
+                    **seed,
+                    'block_id': f"blk_resegment_{sha256_text(f'{block_id}|{index}|{identity}')[:16]}",
+                    'text': text,
+                    'text_sha256': sha256_text(text),
+                    'block_kind': block_kind_override or seed.get('block_kind'),
+                    'source_block_ids': segment_source_ids,
+                    'source_spans': spans,
+                    'selection_status': 'reviewed_resegmentation',
+                    'review_decision_id': decision['decision_id'],
+                })
+            consumed.update(source_block_ids[1:])
         elif action == 'split_block':
             texts = decision.get('split_texts')
             ranges = decision.get('split_ranges')
@@ -378,8 +577,16 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
                 original_indexes = sorted(list(by_id).index(value) for value in ordered_ids)
             except ValueError as exc:
                 raise ValueError('reorder_blocks references an unknown canonical block') from exc
-            if original_indexes != list(range(min(original_indexes), max(original_indexes) + 1)):
-                raise ValueError('reorder_blocks currently requires a contiguous source block range')
+            full_indexes = list(range(min(original_indexes), max(original_indexes) + 1))
+            if original_indexes != full_indexes:
+                skipped_ids = [list(by_id)[index] for index in full_indexes if index not in original_indexes]
+                if not all(
+                    latest.get(('canonical_block', value), {}).get('action') == 'exclude_block'
+                    for value in skipped_ids
+                ):
+                    raise ValueError(
+                        'reorder_blocks requires a contiguous source range except for explicitly excluded blocks'
+                    )
             if list(by_id)[min(original_indexes)] != block_id:
                 raise ValueError('reorder_blocks decision must target the first source block in its range')
             members = [by_id[value] for value in ordered_ids]
@@ -387,9 +594,40 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
                 raise ValueError('reorder_blocks cannot cross surfaces')
             for member in members:
                 row = dict(member)
+                member_decision = latest.get(('canonical_block', member['block_id']))
+                member_action = member_decision.get('action') if member_decision else None
+                preserved_target = (
+                    decision.get('preserved_target_correction')
+                    if member['block_id'] == block_id else None
+                )
+                if preserved_target:
+                    corrected = str(preserved_target.get('corrected_text', ''))
+                    if not corrected:
+                        raise ValueError('preserved_target_correction requires corrected_text')
+                    row.update({
+                        'text': corrected,
+                        'text_sha256': sha256_text(corrected),
+                        'selection_status': 'reviewed_correction',
+                        'review_decision_id': preserved_target['decision_id'],
+                        'reorder_decision_id': decision['decision_id'],
+                    })
+                elif member_action == 'correct_text':
+                    corrected = str(member_decision.get('corrected_text', ''))
+                    if not corrected:
+                        raise ValueError('correct_text requires corrected_text')
+                    row.update({
+                        'text': corrected,
+                        'text_sha256': sha256_text(corrected),
+                        'selection_status': 'reviewed_correction',
+                        'review_decision_id': member_decision['decision_id'],
+                        'reorder_decision_id': decision['decision_id'],
+                    })
+                else:
+                    row.update({
+                        'selection_status': 'reviewed_reorder',
+                        'review_decision_id': decision['decision_id'],
+                    })
                 row.update({
-                    'selection_status': 'reviewed_reorder',
-                    'review_decision_id': decision['decision_id'],
                     'source_spans': member.get('source_spans') or [{
                         'block_id': member['block_id'], 'evidence_id': member.get('evidence_id'),
                         'page_id': member.get('page_id'), 'bbox': member.get('bbox', []),
@@ -400,7 +638,8 @@ def _build_reviewed_canonical(package: Path, latest: dict[tuple[str, str], dict[
             consumed.update(set(ordered_ids) - {block_id})
     source_id = read_json(package / 'package_manifest.json').get('source', {}).get('sha256')
     paragraphs = []
-    for order, block in enumerate(out, start=1):
+    active_blocks = [block for block in out if block.get('canonical_disposition') != 'excluded']
+    for order, block in enumerate(active_blocks, start=1):
         spans = block.get('source_spans') or []
         pid = f"para_{sha256_text(json.dumps(spans, sort_keys=True))[:16]}"
         paragraphs.append({
@@ -468,6 +707,22 @@ def _apply_review_locked(
         prior = staged_latest.get((kind, target_id))
         if prior and prior.get('decision_id') not in row.get('supersedes', []):
             raise ValueError(f'new decision for {kind}:{target_id} must supersede {prior.get("decision_id")}')
+        preserved_target = row.get('preserved_target_correction')
+        if kind == 'canonical_block' and row.get('action') == 'reorder_blocks':
+            prior_is_correction = bool(prior and prior.get('action') == 'correct_text')
+            if prior_is_correction and not preserved_target:
+                raise ValueError(
+                    'reorder_blocks superseding correct_text must preserve the target correction explicitly'
+                )
+            if preserved_target:
+                expected = {
+                    'decision_id': prior.get('decision_id') if prior else None,
+                    'corrected_text': prior.get('corrected_text') if prior else None,
+                }
+                if not prior_is_correction or preserved_target != expected:
+                    raise ValueError(
+                        'preserved_target_correction must exactly match the explicitly superseded correct_text decision'
+                    )
         staged_by_id[row['decision_id']] = row
         staged_latest[(kind, target_id)] = row
         accepted.append(row)
@@ -494,7 +749,10 @@ def _apply_review_locked(
     paragraph_projection = None
     if accepted_canonical:
         canonical_projection, paragraph_projection = _build_reviewed_canonical(
-            package, {('canonical_block', row['target_id']): row for row in accepted_canonical},
+            package, {
+                key: row for key, row in staged_latest.items()
+                if key[0] == 'canonical_block'
+            },
         )
 
     latest = staged_latest
@@ -526,7 +784,15 @@ def _apply_review_locked(
                 'reviewer_type': decision.get('reviewer_type'),
                 'reviewer_id': decision.get('reviewer_id'),
             })
+            if decision.get('list_semantics'):
+                row['list_semantics'] = decision['list_semantics']
         coverage.append(row)
+    if accepted_paragraphs:
+        # The reviewed paragraph projection is the durable active projection,
+        # not merely the mechanical candidates with a parallel coverage file.
+        # Materializing semantic status here keeps downstream inspectors from
+        # seeing coverage_status=unreviewed after a bound review decision.
+        paragraph_projection = coverage
     leap_rows = []
     paragraph_ids = {str(row.get('paragraph_id')) for row in coverage}
     paragraph_dispositions = {
@@ -589,6 +855,8 @@ def _apply_review_locked(
             'items': structure.get('toc_items', []),
             'review_decision_id': structure['decision_id'],
         }
+        if structure.get('document_title'):
+            toc_projection['document_title'] = str(structure['document_title']).strip()
         boundary_projection = {
             'status': 'reviewed' if structure.get('disposition') == 'reviewed' else 'needs_review',
             'chapters': structure.get('boundaries', []),
@@ -613,6 +881,54 @@ def _apply_review_locked(
             for row in coverage
         ]
 
+    asset_projection = []
+    for asset in read_jsonl(package / 'ledger' / 'assets.jsonl'):
+        row = dict(asset)
+        decision = latest.get(('asset', str(asset.get('occurrence_id'))))
+        if decision:
+            row.update({
+                'review_status': decision.get('disposition'),
+                'semantic_reading': decision.get('semantic_reading'),
+                'review_decision_id': decision.get('decision_id'),
+                'reviewer_id': decision.get('reviewer_id'),
+                'review_reason': decision.get('reason'),
+            })
+        asset_projection.append(row)
+    object_projection = []
+    for obj in read_jsonl(package / 'ledger' / 'objects.jsonl'):
+        row = dict(obj)
+        decision = latest.get(('object', str(obj.get('object_id'))))
+        if decision:
+            row.update({
+                'review_status': decision.get('disposition'),
+                'relation_status': (
+                    'verified' if decision.get('relations_reviewed')
+                    else row.get('relation_status')
+                ),
+                'representation_status': decision.get('representation_status'),
+                'visual_verified': bool(decision.get('visual_verified')),
+                'source_verified': bool(decision.get('source_verified')),
+                'review_decision_id': decision.get('decision_id'),
+                'reviewer_id': decision.get('reviewer_id'),
+                'review_reason': decision.get('reason'),
+            })
+            if 'source_block_ids_override' in decision:
+                row['source_block_ids'] = list(dict.fromkeys(decision['source_block_ids_override']))
+                row['source_relation_override'] = {
+                    'decision_id': decision.get('decision_id'),
+                    'kind': 'reviewed_source_block_binding',
+                }
+            if 'object_kind_override' in decision:
+                row['raw_object_kind'] = row.get('object_kind')
+                row['object_kind'] = decision['object_kind_override']
+            if 'asset_occurrence_ids_override' in decision:
+                row['asset_occurrence_ids'] = list(dict.fromkeys(decision['asset_occurrence_ids_override']))
+            if 'representations_override' in decision:
+                row['representations'] = decision['representations_override']
+            if 'caption_override' in decision:
+                row['caption'] = decision['caption_override']
+        object_projection.append(row)
+
     # Finish every validation and materialize every derived payload in memory
     # before the first durable write. The manifest is the commit marker and is
     # written last; gate bindings fail closed after an interrupted commit.
@@ -631,9 +947,37 @@ def _apply_review_locked(
         new_manifest['toc_projection_sha256'] = sha256_text(toc_bytes)
         new_manifest['boundary_projection_sha256'] = sha256_text(boundary_bytes)
         new_manifest['structure_review_decision_id'] = structure['decision_id'] if structure else None
-    revision_seed = '|'.join(row.get('decision_id', '') for row in new_ledger_rows)
+    active_revision_rows = [
+        row for row in new_ledger_rows
+        if row.get('source_sha256') == manifest.get('source', {}).get('sha256')
+        and row.get('active_run_id') == manifest.get('active_run_id')
+    ]
+    revision_seed = '|'.join(row.get('decision_id', '') for row in active_revision_rows)
     new_manifest['review_revision'] = sha256_text(revision_seed)[:20] if revision_seed else '0'
     new_manifest['review_ledger_sha256'] = sha256_text(ledger_bytes)
+    asset_bytes = ''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in asset_projection)
+    object_bytes = ''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in object_projection)
+    active_review_rows_reversed = []
+    active_review_keys: set[tuple[str, str]] = set()
+    current_paragraph_ids = {str(row.get('paragraph_id')) for row in coverage}
+    for row in reversed(new_ledger_rows):
+        if (
+            row.get('source_sha256') != manifest.get('source', {}).get('sha256')
+            or row.get('active_run_id') != manifest.get('active_run_id')
+        ):
+            continue
+        key = (str(row.get('kind')), str(row.get('target_id')))
+        if key[0] == 'paragraph' and key[1] not in current_paragraph_ids:
+            continue
+        if key in active_review_keys:
+            continue
+        active_review_keys.add(key)
+        active_review_rows_reversed.append(row)
+    active_review_rows = list(reversed(active_review_rows_reversed))
+    active_review_bytes = ''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in active_review_rows)
+    new_manifest['asset_projection_sha256'] = sha256_text(asset_bytes)
+    new_manifest['object_projection_sha256'] = sha256_text(object_bytes)
+    new_manifest['active_review_projection_sha256'] = sha256_text(active_review_bytes)
     new_manifest['updated_at'] = utc_now()
 
     if canonical_projection is not None:
@@ -642,6 +986,9 @@ def _apply_review_locked(
         write_jsonl(package / 'ledger' / 'paragraph_candidates_reviewed.jsonl', paragraph_projection)
     write_jsonl(package / 'ledger' / 'paragraph_coverage.jsonl', coverage)
     write_jsonl(package / 'ledger' / 'reasoning_leap_candidates.jsonl', leap_rows)
+    write_jsonl(package / 'ledger' / 'assets_reviewed.jsonl', asset_projection)
+    write_jsonl(package / 'ledger' / 'objects_reviewed.jsonl', object_projection)
+    write_jsonl(package / 'ledger' / 'review_decisions_active.jsonl', active_review_rows)
     if toc_projection is not None and boundary_projection is not None:
         write_json(package / 'toc' / 'canonical_toc.json', toc_projection)
         write_json(package / 'toc' / 'chapter_boundary_map.json', boundary_projection)
@@ -654,13 +1001,19 @@ def _apply_review_locked(
             'kind': row['kind'], 'target_id': row['target_id'], 'at': utc_now(),
         })
     manifest = new_manifest
+    requested_target = str(manifest.get('profile', {}).get('target') or 'review')
+    # Always materialize the strict citation audit for fail-closed diagnostics,
+    # but do not promote the package head beyond the stage requested by its
+    # immutable profile.  The returned result remains the strict audit for API
+    # compatibility and adversarial visibility.
     gate = evaluate_gates(package, target='citation')
-    manifest['trust_status'] = gate['trust_status']
+    requested_gate = evaluate_gates(package, target=requested_target)
+    manifest['trust_status'] = requested_gate['trust_status']
     write_json(package / 'package_manifest.json', manifest)
     return {
         'accepted': len(accepted),
         'review_revision': manifest['review_revision'],
-        'trust_status': gate['trust_status'],
+        'trust_status': requested_gate['trust_status'],
         'gate_status': gate['public_status'],
         'evaluation_status': gate['status'],
         'hard_blocker_count': len(gate['hard_blockers']),
@@ -765,6 +1118,8 @@ def rehydrate_review_head(package: Path, manifest: dict[str, Any]) -> dict[str, 
             'items': structure.get('toc_items', []),
             'review_decision_id': structure.get('decision_id'),
         }
+        if structure.get('document_title'):
+            toc_projection['document_title'] = str(structure['document_title']).strip()
         boundary_projection = {
             'status': 'reviewed' if structure.get('disposition') == 'reviewed' else 'needs_review',
             'chapters': structure.get('boundaries', []),

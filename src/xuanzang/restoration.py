@@ -195,32 +195,496 @@ def _toc_candidates(result: ExtractionResult, paragraphs: list[dict[str, Any]]) 
     return rows
 
 
-def _complex_objects(result: ExtractionResult) -> list[dict[str, Any]]:
+def _complex_objects(result: ExtractionResult, source: Path | None = None) -> list[dict[str, Any]]:
     evidence = {row['evidence_id']: row for row in result.evidence_blocks}
-    objects = []
+
+    def source_metadata(ev: dict[str, Any]) -> dict[str, Any]:
+        metadata = ev.get('metadata', {}) or {}
+        derived = metadata.get('derived_from_evidence_id')
+        if derived and str(derived) in evidence:
+            return source_metadata(evidence[str(derived)])
+        return metadata
+    def bbox4(row: dict[str, Any]) -> list[float]:
+        value = row.get('bbox')
+        if isinstance(value, list) and len(value) == 4:
+            return [float(item) for item in value]
+        return [0.0, 0.0, 0.0, 0.0]
+
+    objects: list[dict[str, Any]] = []
+    table_groups: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    caption_groups: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    code_groups: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for block in result.canonical_blocks:
         kind = block.get('block_kind')
+        ev = evidence.get(block.get('evidence_id'), {})
+        metadata = ev.get('metadata', {}) or {}
+        if metadata.get('pre_dom_path') is not None:
+            identity = str(metadata.get('pre_dom_path'))
+            code_groups.setdefault((str(block.get('page_id')), identity), []).append((block, ev))
         if kind not in {'table_candidate', 'equation_candidate', 'caption_candidate'}:
             continue
-        ev = evidence.get(block.get('evidence_id'), {})
+        if kind == 'table_candidate':
+            identity = str(metadata.get('table_id') or metadata.get('table_dom_path') or block['block_id'])
+            table_groups.setdefault((str(block.get('page_id')), identity), []).append((block, ev))
+            continue
+        if kind == 'caption_candidate':
+            identity = str(metadata.get('figcaption_id') or metadata.get('figcaption_dom_path') or block['block_id'])
+            caption_groups.setdefault((str(block.get('page_id')), identity), []).append((block, ev))
+            continue
+        representations = [
+            {'kind': 'text', 'value': block.get('text', ''), 'metadata': metadata},
+        ]
+        if kind == 'equation_candidate' and metadata.get('mathml_xml'):
+            representations.append({
+                'kind': 'mathml',
+                'value': metadata.get('mathml_xml'),
+                'sha256': metadata.get('mathml_sha256'),
+                'alttext': metadata.get('mathml_alttext'),
+                'display': metadata.get('mathml_display'),
+                'dom_path': metadata.get('mathml_dom_path'),
+                'source_document': metadata.get('raw_xhtml'),
+            })
         objects.append({
             'object_id': f"obj_{sha256_text(block['block_id'] + str(kind))[:16]}",
             'object_kind': kind.replace('_candidate', ''), 'page_id': block.get('page_id'),
             'source_block_ids': [block.get('block_id')], 'evidence_ids': [block.get('evidence_id')],
             'bbox': block.get('bbox', []), 'coordinate_space': block.get('coordinate_space'),
-            'representations': [{'kind': 'text', 'value': block.get('text', ''), 'metadata': ev.get('metadata', {})}],
+            'dom_path': metadata.get('mathml_dom_path'),
+            'source_id': metadata.get('mathml_sha256'),
+            'representations': representations,
             'relation_status': 'needs_review' if kind == 'caption_candidate' else 'not_applicable',
             'review_status': 'unreviewed',
         })
-    for asset in result.assets:
+
+    for (page_id, identity), members in table_groups.items():
+        first_meta = members[0][1].get('metadata', {}) or {}
+        ordered = sorted(members, key=lambda item: int(item[1].get('ordinal', 0)))
+        cells = [{
+            'row': (ev.get('metadata') or {}).get('table_row_index'),
+            'column': (ev.get('metadata') or {}).get('table_cell_index'),
+            'tag': (ev.get('metadata') or {}).get('table_cell_tag'),
+            'rowspan': (ev.get('metadata') or {}).get('rowspan'),
+            'colspan': (ev.get('metadata') or {}).get('colspan'),
+            'text': block.get('text', ''),
+            'dom_container_text': (ev.get('metadata') or {}).get('dom_container_text'),
+            'block_id': block.get('block_id'),
+            'evidence_id': block.get('evidence_id'),
+        } for block, ev in ordered]
         objects.append({
-            'object_id': f"obj_{sha256_text(str(asset.get('occurrence_id')))[:16]}",
-            'object_kind': 'figure', 'page_id': asset.get('page_id'),
-            'source_block_ids': [], 'evidence_ids': [], 'asset_occurrence_ids': [asset.get('occurrence_id')],
-            'bbox': asset.get('bbox', []), 'coordinate_space': asset.get('coordinate_space'),
-            'representations': [{'kind': 'asset', 'value': asset.get('asset_path'), 'sha256': asset.get('asset_sha256')}],
-            'relation_status': 'needs_review', 'review_status': 'unreviewed',
+            'object_id': f"obj_{sha256_text('table|' + page_id + '|' + identity)[:16]}",
+            'object_kind': 'table', 'page_id': page_id,
+            'source_block_ids': [block['block_id'] for block, _ in ordered],
+            'evidence_ids': [block['evidence_id'] for block, _ in ordered],
+            'asset_occurrence_ids': [], 'bbox': [], 'coordinate_space': 'dom_path',
+            'dom_path': first_meta.get('table_dom_path'), 'source_id': first_meta.get('table_id'),
+            'caption': first_meta.get('table_caption'),
+            'representations': [{'kind': 'table_cells', 'value': cells}],
+            'relation_status': 'linked' if first_meta.get('table_caption') else 'not_present',
+            'review_status': 'unreviewed',
         })
+
+    caption_object_ids: dict[tuple[str, str], str] = {}
+    caption_members_by_figure: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+
+    # PDF extractors do not have DOM figure identities.  Bind embedded images to
+    # the nearest following caption on the same page using the retained PDF
+    # coordinates.  The synthetic identity is deterministic and remains fully
+    # auditable through the original asset/caption bboxes and evidence IDs.
+    pdf_caption_identity: dict[tuple[str, str], str] = {}
+    caption_geometry: dict[str, list[tuple[float, str]]] = {}
+    for (page_id, identity), members in caption_groups.items():
+        boxes = [block.get('bbox', []) for block, _ in members]
+        tops = [float(box[1]) for box in boxes if isinstance(box, list) and len(box) == 4]
+        if tops:
+            synthetic = f'pdf_caption_{sha256_text(page_id + "|" + identity)[:16]}'
+            pdf_caption_identity[(page_id, identity)] = synthetic
+            caption_geometry.setdefault(page_id, []).append((min(tops), synthetic))
+    for asset in result.assets:
+        if asset.get('figure_id') or asset.get('figure_dom_path'):
+            continue
+        box = asset.get('bbox', [])
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+        page_id = str(asset.get('page_id'))
+        asset_bottom = float(box[3])
+        following = [
+            (top - asset_bottom, identity)
+            for top, identity in caption_geometry.get(page_id, [])
+            if top >= asset_bottom - 12.0
+        ]
+        if following:
+            distance, identity = min(following, key=lambda item: item[0])
+            # A generous page-relative limit permits multi-panel figures while
+            # preventing unrelated logos/ornaments from absorbing a caption.
+            if distance <= 180.0:
+                asset['figure_id'] = identity
+
+    for (page_id, identity), members in caption_groups.items():
+        ordered = sorted(members, key=lambda item: int(item[1].get('ordinal', 0)))
+        first_meta = ordered[0][1].get('metadata', {}) or {}
+        object_id = f"obj_{sha256_text('caption|' + page_id + '|' + identity)[:16]}"
+        figure_identity = str(
+            first_meta.get('figure_id') or first_meta.get('figure_dom_path')
+            or pdf_caption_identity.get((page_id, identity)) or ''
+        )
+        caption_object_ids[(page_id, figure_identity)] = object_id
+        caption_members_by_figure[(page_id, figure_identity)] = ordered
+        objects.append({
+            'object_id': object_id, 'object_kind': 'caption', 'page_id': page_id,
+            'source_block_ids': [block['block_id'] for block, _ in ordered],
+            'evidence_ids': [block['evidence_id'] for block, _ in ordered],
+            'asset_occurrence_ids': [],
+            'bbox': [
+                min(bbox4(block)[0] for block, _ in ordered),
+                min(bbox4(block)[1] for block, _ in ordered),
+                max(bbox4(block)[2] for block, _ in ordered),
+                max(bbox4(block)[3] for block, _ in ordered),
+            ],
+            'coordinate_space': ordered[0][0].get('coordinate_space') or 'dom_path',
+            'dom_path': first_meta.get('figcaption_dom_path'),
+            'representations': [{
+                'kind': 'text',
+                'value': ' '.join(block.get('text', '') for block, _ in ordered).strip(),
+                'metadata': first_meta,
+            }],
+            'related_figure_identity': figure_identity,
+            'relation_status': 'linked' if figure_identity else 'needs_review',
+            'review_status': 'unreviewed',
+        })
+
+    for (page_id, identity), members in code_groups.items():
+        ordered = sorted(members, key=lambda item: int(item[1].get('ordinal', 0)))
+        first_meta = ordered[0][1].get('metadata', {}) or {}
+        pre_path = tuple(first_meta.get('pre_dom_path') or ())
+        callout_occurrences = [
+            asset.get('occurrence_id') for asset in result.assets
+            if str(asset.get('page_id')) == page_id
+            and asset.get('callout_role') == 'code_callout'
+            and tuple(asset.get('dom_path') or ())[:len(pre_path)] == pre_path
+        ]
+        code_text = str(first_meta.get('pre_text') or '')
+        code_xml = str(first_meta.get('pre_xml') or '')
+        objects.append({
+            'object_id': f"obj_{sha256_text('code|' + page_id + '|' + identity)[:16]}",
+            'object_kind': 'code',
+            'page_id': page_id,
+            'source_block_ids': [str(block.get('block_id')) for block, _ in ordered],
+            'evidence_ids': [str(block.get('evidence_id')) for block, _ in ordered],
+            'asset_occurrence_ids': callout_occurrences,
+            'bbox': [],
+            'coordinate_space': 'dom_path',
+            'dom_path': list(pre_path),
+            'source_id': first_meta.get('pre_text_sha256'),
+            'caption_object_id': None,
+            'representations': [
+                {
+                    'kind': 'code_text', 'value': code_text,
+                    'sha256': first_meta.get('pre_text_sha256'),
+                    'language': first_meta.get('code_language'),
+                },
+                {
+                    'kind': 'source_xml', 'value': code_xml,
+                    'sha256': first_meta.get('pre_xml_sha256'),
+                    'dom_path': list(pre_path),
+                    'source_document': first_meta.get('raw_xhtml'),
+                },
+            ],
+            'relation_status': 'linked' if callout_occurrences else 'not_present',
+            'review_status': 'unreviewed',
+        })
+
+    callout_blocks: dict[tuple[str, tuple[int, ...]], dict[str, Any]] = {}
+    for block in result.canonical_blocks:
+        ev = evidence.get(block.get('evidence_id'), {})
+        metadata = ev.get('metadata', {}) or {}
+        if metadata.get('source_role') == 'code_callout':
+            callout_blocks[(
+                str(block.get('page_id')),
+                tuple(metadata.get('callout_dom_path') or metadata.get('dom_path') or ()),
+            )] = block
+    for asset in result.assets:
+        if asset.get('callout_role') != 'code_callout':
+            continue
+        page_id = str(asset.get('page_id'))
+        block = callout_blocks.get((page_id, tuple(asset.get('dom_path') or ())))
+        source_block_ids = [str(block.get('block_id'))] if block else []
+        evidence_ids = [str(block.get('evidence_id'))] if block else []
+        target = str(asset.get('callout_target') or '')
+        objects.append({
+            'object_id': f"obj_{sha256_text('callout|' + page_id + '|' + str(asset.get('occurrence_id')))[:16]}",
+            'object_kind': 'callout',
+            'page_id': page_id,
+            'source_block_ids': source_block_ids,
+            'evidence_ids': evidence_ids,
+            'asset_occurrence_ids': [asset.get('occurrence_id')],
+            'bbox': bbox4(asset),
+            'coordinate_space': asset.get('coordinate_space') or 'dom_path',
+            'dom_path': asset.get('dom_path'),
+            'source_id': asset.get('callout_anchor_id') or asset.get('occurrence_id'),
+            'caption_object_id': None,
+            'representations': [
+                {
+                    'kind': 'asset', 'value': asset.get('asset_path'),
+                    'sha256': asset.get('asset_sha256'),
+                    'occurrence_id': asset.get('occurrence_id'),
+                    'alt_text': asset.get('alt_text'),
+                },
+                {
+                    'kind': 'callout_link', 'value': target,
+                    'anchor_id': asset.get('callout_anchor_id'),
+                    'dom_path': asset.get('dom_path'),
+                },
+            ],
+            'relation_status': 'linked' if target and block else 'needs_review',
+            'review_status': 'unreviewed',
+        })
+
+    figure_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for asset in result.assets:
+        if asset.get('callout_role') == 'code_callout':
+            continue
+        identity = str(asset.get('figure_id') or asset.get('figure_dom_path') or asset.get('occurrence_id'))
+        figure_groups.setdefault((str(asset.get('page_id')), identity), []).append(asset)
+    for (page_id, identity), group_assets in figure_groups.items():
+        caption_members = caption_members_by_figure.get((page_id, identity), [])
+        caption_blocks = [block for block, _ in caption_members]
+        caption_evidence = [block.get('evidence_id') for block in caption_blocks]
+        label_blocks = []
+        for asset in group_assets:
+            for row in asset.get('vector_label_blocks', []):
+                if isinstance(row, dict) and row.get('block_id') and row.get('evidence_id'):
+                    label_blocks.append(dict(row))
+        label_blocks = list({str(row['block_id']): row for row in label_blocks}.values())
+        representations = [{
+            'kind': 'asset', 'value': asset.get('asset_path'), 'sha256': asset.get('asset_sha256'),
+            'occurrence_id': asset.get('occurrence_id'), 'alt_text': asset.get('alt_text'),
+        } for asset in group_assets]
+        if label_blocks:
+            representations.append({
+                'kind': 'figure_labels',
+                'value': [{
+                    'text': row.get('text', ''),
+                    'bbox': row.get('bbox', []),
+                    'block_id': row.get('block_id'),
+                    'evidence_id': row.get('evidence_id'),
+                } for row in label_blocks],
+                'coordinate_space': 'pdf_points',
+                'publication_role': 'figure_internal_not_body_prose',
+            })
+        captions = [str(asset.get('caption_text')) for asset in group_assets if asset.get('caption_text')]
+        if captions:
+            representations.append({'kind': 'caption_text', 'value': captions[0]})
+        caption_object_id = caption_object_ids.get((page_id, identity))
+        occurrence_ids = [asset.get('occurrence_id') for asset in group_assets]
+        objects.append({
+            'object_id': f"obj_{sha256_text('figure|' + page_id + '|' + identity)[:16]}",
+            'object_kind': 'figure', 'page_id': page_id,
+            'source_block_ids': list(dict.fromkeys([
+                *[block['block_id'] for block in caption_blocks],
+                *[str(row['block_id']) for row in label_blocks],
+            ])),
+            'evidence_ids': list(dict.fromkeys([
+                *caption_evidence,
+                *[str(row['evidence_id']) for row in label_blocks],
+            ])),
+            'asset_occurrence_ids': occurrence_ids,
+            'bbox': [
+                min(bbox4(asset)[0] for asset in group_assets),
+                min(bbox4(asset)[1] for asset in group_assets),
+                max(bbox4(asset)[2] for asset in group_assets),
+                max(bbox4(asset)[3] for asset in group_assets),
+            ],
+            'coordinate_space': group_assets[0].get('coordinate_space') or 'dom_path',
+            'dom_path': group_assets[0].get('figure_dom_path') or group_assets[0].get('dom_path'),
+            'source_id': group_assets[0].get('figure_id'),
+            'caption_object_id': caption_object_id,
+            'representations': representations,
+            'relation_status': 'linked' if caption_blocks or any(asset.get('alt_text') for asset in group_assets) else 'not_present',
+            'review_status': 'unreviewed',
+        })
+        if caption_object_id:
+            caption_object = next(
+                (row for row in objects if row.get('object_id') == caption_object_id), None,
+            )
+            if caption_object is not None:
+                caption_object['asset_occurrence_ids'] = occurrence_ids
+
+    index_start = min(
+        (
+            int(row['source_page']) for row in result.toc_candidates
+            if str(row.get('text') or '').strip().casefold() == 'index' and row.get('source_page')
+        ),
+        default=None,
+    )
+    if result.source_format == 'pdf' and index_start is not None:
+        index_members = [
+            (block, evidence.get(block.get('evidence_id'), {}))
+            for block in result.canonical_blocks
+            if int(str(block.get('page_id') or 'page_0').split('_')[-1]) >= index_start
+        ]
+        pages: list[dict[str, Any]] = []
+        for page_id in sorted({str(block.get('page_id')) for block, _ in index_members}):
+            members = [(block, ev) for block, ev in index_members if str(block.get('page_id')) == page_id]
+            columns = []
+            for region in ('left', 'right'):
+                selected = [
+                    (block, ev) for block, ev in members
+                    if source_metadata(ev).get('column_region') == region
+                ]
+                if not selected:
+                    continue
+                boxes = [block.get('bbox', []) for block, _ in selected]
+                columns.append({
+                    'column_index': 0 if region == 'left' else 1,
+                    'region': region,
+                    'bbox': [
+                        min(float(box[0]) for box in boxes), min(float(box[1]) for box in boxes),
+                        max(float(box[2]) for box in boxes), max(float(box[3]) for box in boxes),
+                    ],
+                    'source_block_ids': [block['block_id'] for block, _ in selected],
+                    'evidence_ids': [block['evidence_id'] for block, _ in selected],
+                    'text': '\n'.join(block.get('text', '') for block, _ in selected),
+                })
+            pages.append({
+                'page_id': page_id,
+                'source_page': int(page_id.split('_')[-1]),
+                'reading_order': 'left_column_then_right_column',
+                'columns': columns,
+            })
+        source_blocks = [block['block_id'] for block, _ in index_members]
+        source_evidence = [block['evidence_id'] for block, _ in index_members]
+        objects.append({
+            'object_id': f"obj_{sha256_text('pdf-index|' + str(index_start) + '|' + '|'.join(source_blocks))[:16]}",
+            'object_kind': 'index',
+            'page_id': f'page_{index_start:04d}',
+            'page_ids': [page['page_id'] for page in pages],
+            'source_block_ids': source_blocks,
+            'evidence_ids': source_evidence,
+            'asset_occurrence_ids': [],
+            'bbox': [],
+            'coordinate_space': 'pdf_points',
+            'representations': [{
+                'kind': 'index_columns',
+                'value': pages,
+                'metadata': {
+                    'serialization': 'page_order_then_left_column_then_right_column',
+                    'entry_continuations_preserved': True,
+                },
+            }],
+            'relation_status': 'linked',
+            'review_status': 'unreviewed',
+        })
+
+    # PDF link annotations are first-class reversible objects.  Visible URL
+    # glyphs alone do not preserve an annotation's rectangle, destination, or
+    # internal navigation target, and a link-rich TOC/index can otherwise look
+    # complete while silently losing its interaction layer.
+    if result.source_format == 'pdf' and source is not None and source.is_file():
+        try:
+            import fitz  # type: ignore
+
+            link_kind_names = {
+                int(fitz.LINK_NONE): 'none',
+                int(fitz.LINK_GOTO): 'internal_goto',
+                int(fitz.LINK_URI): 'external_uri',
+                int(fitz.LINK_LAUNCH): 'launch',
+                int(fitz.LINK_NAMED): 'named',
+                int(fitz.LINK_GOTOR): 'remote_goto',
+            }
+            with fitz.open(source) as document:
+                canonical_by_page: dict[str, list[dict[str, Any]]] = {}
+                for block in result.canonical_blocks:
+                    canonical_by_page.setdefault(str(block.get('page_id')), []).append(block)
+                for page_index, page in enumerate(document):
+                    page_id = f'page_{page_index + 1:04d}'
+                    for link_index, link in enumerate(page.get_links(), 1):
+                        rect_value = link.get('from')
+                        rect = [float(value) for value in rect_value] if rect_value is not None else []
+                        kind_number = int(link.get('kind', fitz.LINK_NONE))
+                        destination_index = link.get('page')
+                        destination_page_id = None
+                        if isinstance(destination_index, int) and destination_index >= 0:
+                            destination_page_id = f'page_{destination_index + 1:04d}'
+                        uri = link.get('uri')
+                        filename = link.get('file')
+                        named_target = (
+                            link.get('name') or link.get('nameddest')
+                            or (str(destination_index) if isinstance(destination_index, str) else None)
+                        )
+                        xref = int(link.get('xref') or 0)
+                        reversible_locator = {
+                            'source_page': page_index + 1,
+                            'annotation_index': link_index,
+                            'xref': xref,
+                            'bbox': rect,
+                            'coordinate_space': 'pdf_points',
+                        }
+                        target = {
+                            'link_type': link_kind_names.get(kind_number, f'kind_{kind_number}'),
+                            'kind_number': kind_number,
+                            'uri': uri,
+                            'destination_page_id': destination_page_id,
+                            'destination_page_index': destination_index,
+                            'destination_point': (
+                                [float(value) for value in link['to']]
+                                if link.get('to') is not None else None
+                            ),
+                            'named_target': named_target,
+                            'external_file': filename,
+                            'zoom': link.get('zoom'),
+                        }
+                        identity = json.dumps(
+                            {'locator': reversible_locator, 'target': target},
+                            ensure_ascii=False, sort_keys=True, default=str,
+                        )
+                        overlapping_blocks = []
+                        if len(rect) == 4:
+                            x0, y0, x1, y1 = rect
+                            for block in canonical_by_page.get(page_id, []):
+                                block_rect = block.get('bbox', [])
+                                if not isinstance(block_rect, list) or len(block_rect) != 4:
+                                    continue
+                                bx0, by0, bx1, by1 = [float(value) for value in block_rect]
+                                if min(x1, bx1) > max(x0, bx0) and min(y1, by1) > max(y0, by0):
+                                    overlapping_blocks.append(block)
+                        objects.append({
+                            'object_id': f"obj_{sha256_text('pdf-link|' + identity)[:16]}",
+                            'object_kind': 'link',
+                            'page_id': page_id,
+                            'source_block_ids': [block['block_id'] for block in overlapping_blocks],
+                            'evidence_ids': [block['evidence_id'] for block in overlapping_blocks],
+                            'asset_occurrence_ids': [],
+                            'bbox': rect,
+                            'coordinate_space': 'pdf_points',
+                            'source_locator': reversible_locator,
+                            'representations': [{
+                                'kind': 'pdf_link_annotation',
+                                'value': target,
+                                'metadata': reversible_locator,
+                            }],
+                            'relation_status': 'linked',
+                            'review_status': 'unreviewed',
+                        })
+        except Exception as exc:
+            # Extraction must remain usable when the optional PDF backend is
+            # unavailable; the missing annotation layer is exposed as a typed
+            # object rather than silently discarded.
+            objects.append({
+                'object_id': f"obj_{sha256_text('pdf-link-extraction-failure|' + type(exc).__name__)[:16]}",
+                'object_kind': 'link_extraction_failure',
+                'page_id': None,
+                'source_block_ids': [],
+                'evidence_ids': [],
+                'asset_occurrence_ids': [],
+                'bbox': [],
+                'coordinate_space': 'pdf_points',
+                'representations': [{
+                    'kind': 'error',
+                    'value': {'type': type(exc).__name__, 'message': str(exc)},
+                }],
+                'relation_status': 'needs_review',
+                'review_status': 'unreviewed',
+            })
     return objects
 
 
@@ -233,7 +697,6 @@ def _write_run(
     ensure_dir(run_work / 'toc')
     paragraphs = _paragraph_candidates(result)
     toc_candidates = _toc_candidates(result, paragraphs)
-    objects = _complex_objects(result)
     surface_kind = {
         'pdf': 'pdf_page', 'image': 'image_page', 'image_directory': 'image_page',
         'epub': 'epub_spine_item', 'docx': 'docx_story', 'text': 'legacy_text',
@@ -252,10 +715,16 @@ def _write_run(
         surface.setdefault('surface_kind', surface_kind)
         surfaces.append(surface)
     result.pages = surfaces
+    for evidence in result.evidence_blocks:
+        metadata = evidence.get('metadata')
+        raw_xhtml = metadata.get('raw_xhtml') if isinstance(metadata, dict) else None
+        if raw_xhtml and not Path(str(raw_xhtml)).is_absolute() and not str(raw_xhtml).startswith('runs/'):
+            metadata['raw_xhtml'] = f'runs/{run_id}/{raw_xhtml}'
     for asset in result.assets:
         asset_path = asset.get('asset_path')
         if asset_path and not Path(str(asset_path)).is_absolute() and not str(asset_path).startswith('runs/'):
             asset['asset_path'] = f'runs/{run_id}/{asset_path}'
+    objects = _complex_objects(result, source)
     write_jsonl(run_work / 'ledger' / 'surfaces.jsonl', surfaces)
     # Compatibility projection for v1 callers and paginated tooling.
     write_jsonl(run_work / 'ledger' / 'pages.jsonl', surfaces)
@@ -289,7 +758,7 @@ def _write_run(
     write_json(run_work / 'toc' / 'toc_candidates.json', {'status': 'evidence_only', 'candidates': toc_candidates})
     write_json(run_work / 'toc' / 'canonical_toc.json', {'status': 'needs_review', 'items': [], 'source_candidates': len(toc_candidates)})
     extraction_audit = {
-        'status': 'PASS_HINT' if result.pages and result.evidence_blocks else 'FAIL_REVIEW',
+        'status': 'PASS_HINT' if result.pages and result.evidence_blocks and not result.blockers else 'FAIL_REVIEW',
         'source_format': result.source_format,
         'page_count': len(result.pages),
         'evidence_block_count': len(result.evidence_blocks),
@@ -300,7 +769,7 @@ def _write_run(
     }
     write_json(run_work / 'audit' / 'extraction_audit.json', extraction_audit)
     write_json(run_work / 'audit' / 'source_integrity.json', {
-        'status': 'PASS' if result.pages and result.evidence_blocks else 'FAIL_REVIEW',
+        'status': 'PASS' if result.pages and result.evidence_blocks and not result.blockers else 'FAIL_REVIEW',
         'format': result.source_format, 'pages': len(result.pages),
         'text_blocks': len(result.canonical_blocks), 'image_blocks': len(result.assets),
         'hard_blockers': result.blockers, 'v2_projection': True,
@@ -446,7 +915,9 @@ def _build_head_manifest(
         }),
         'trust_status': 'needs_review',
         'canonical_revision': canonical_revision,
-        'review_revision': (existing or {}).get('review_revision', '0'),
+        'review_revision': (
+            (existing or {}).get('review_revision', '0') if preserve_review_state else '0'
+        ),
         'lifecycle': (existing or {}).get('lifecycle', {'state': 'active'}),
         'updated_at': utc_now(),
     }

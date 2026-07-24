@@ -41,7 +41,7 @@ def test_zcode_wrapper_check_env_and_help():
     report = json.loads(result.stdout)
     assert report['ok'] is True
     assert report['xuanzang_importable'] is True
-    assert report['xuanzang_version'] == '2.1.0'
+    assert report['xuanzang_version'] == '2.2.0'
     assert report['zhipu_api_key_present'] is False
     assert 'ZHIPU_API_KEY' in report['optional_env']
 

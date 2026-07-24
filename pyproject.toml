@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xuanzang-skill"
-version = "2.1.0"
-description = "Auditable evidence restoration with semantic/visual structure review, OCR routing, ManualStrict coverage, and trust-gated publishing."
+version = "2.2.0"
+description = "Local-strict book reconstruction with auditable evidence, semantic/visual structure review, and independently verified Markdown publishing."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
